@@ -15,6 +15,7 @@ const { deriveAchievements } = require('./achievements');
 const { buildBudgetSummary } = require('./budgets');
 const { buildExpenseCsv } = require('./csvExport');
 const { buildQuestReport } = require('./reports');
+const { securityHeaders, createAuthRateLimiter } = require('./security');
 const {
   SESSION_TTL_MS,
   normalizeEmail,
@@ -29,6 +30,8 @@ const {
 
 const app = express();
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(securityHeaders);
 const MAX_UPLOAD_MB = Math.min(20, Math.max(1, Number(process.env.MAX_UPLOAD_MB) || 5));
 const MAX_CSV_ROWS = Math.min(10000, Math.max(100, Number(process.env.MAX_CSV_ROWS) || 5000));
 const upload = multer({
@@ -309,26 +312,7 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-const authWindows = new Map();
-function authRateLimit(req, res, next) {
-  const now = Date.now();
-  const key = `${req.ip}:${req.path}`;
-  const current = authWindows.get(key);
-  const windowState = !current || now - current.startedAt > 15 * 60 * 1000
-    ? { startedAt: now, count: 0 }
-    : current;
-  windowState.count += 1;
-  authWindows.set(key, windowState);
-  if (authWindows.size > 10_000) {
-    for (const [candidate, value] of authWindows) {
-      if (now - value.startedAt > 15 * 60 * 1000) authWindows.delete(candidate);
-    }
-  }
-  if (windowState.count > 20) {
-    return res.status(429).json({ success: false, error: 'Too many account attempts. Please try again in a few minutes.' });
-  }
-  return next();
-}
+const authRateLimit = createAuthRateLimiter();
 
 async function issueSession(user, res, status = 200) {
   const token = createSessionToken();
@@ -674,6 +658,37 @@ app.patch('/api/transactions/:id/category', async (req, res) => {
       .json({ success: false, error: 'Transaction not found.' });
   }
   return res.json({ success: true, transaction: transactionView(transaction) });
+});
+
+app.patch('/api/transactions/categories', async (req, res) => {
+  const transactionIds = req.body?.transactionIds;
+  const category = req.body?.category;
+  if (!Array.isArray(transactionIds) || transactionIds.length < 1 || transactionIds.length > 100) {
+    return res.status(400).json({ success: false, error: 'transactionIds must contain 1 to 100 transaction IDs.' });
+  }
+  const ids = transactionIds.map(validId);
+  if (ids.some((id) => id === null) || new Set(ids).size !== ids.length) {
+    return res.status(400).json({ success: false, error: 'transactionIds must be unique valid transaction IDs.' });
+  }
+  if (typeof category !== 'string' || !categories.includes(category)) {
+    return res.status(400).json({ success: false, error: `category must be one of: ${categories.join(', ')}.` });
+  }
+
+  await db.transactions.updateMany(
+    { _id: { $in: ids }, user_id: req.user.id },
+    { $set: { final_category: category } },
+  );
+  const transactions = await db.transactions
+    .find({ _id: { $in: ids }, user_id: req.user.id })
+    .toArray();
+  const orderedTransactions = new Map(transactions.map((transaction) => [transaction._id, transaction]));
+  return res.json({
+    success: true,
+    transactions: ids.flatMap((id) => {
+      const transaction = orderedTransactions.get(id);
+      return transaction ? [transactionView(transaction)] : [];
+    }),
+  });
 });
 
 app.post('/api/transactions/:id/skip', async (req, res) => {

@@ -756,34 +756,32 @@ export default function App() {
   }
   async function saveBulkCategoryCorrection(transactionIds, nextCategory) {
     setError('');
-    const outcomes = [];
-    for (let index = 0; index < transactionIds.length; index += 5) {
-      const batch = transactionIds.slice(index, index + 5);
-      outcomes.push(
-        ...(await Promise.allSettled(
-          batch.map((id) =>
-            api(`/transactions/${id}/category`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ category: nextCategory }),
-            }),
-          ),
-        )),
-      );
+    const saved = [];
+    let failure;
+    for (let index = 0; index < transactionIds.length; index += 100) {
+      try {
+        const result = await api('/transactions/categories', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transactionIds: transactionIds.slice(index, index + 100),
+            category: nextCategory,
+          }),
+        });
+        saved.push(...result.transactions);
+      } catch (cause) {
+        failure = cause;
+        break;
+      }
     }
-    const saved = outcomes.flatMap((outcome) =>
-      outcome.status === 'fulfilled' ? [outcome.value.transaction] : [],
-    );
-    const failed = outcomes.filter((outcome) => outcome.status === 'rejected');
     if (saved.length) {
       const savedById = new Map(saved.map((transaction) => [transaction.id, transaction]));
       setTransactions((items) => items.map((item) => savedById.get(item.id) || item));
       setCurrent((item) => item && savedById.get(item.id) ? savedById.get(item.id) : item);
       notify(`${saved.length} transaction${saved.length === 1 ? '' : 's'} updated. XP and quest progress stayed the same.`);
     }
-    if (failed.length) {
-      const reason = failed[0].reason;
-      setError(`${saved.length} of ${transactionIds.length} categories saved. ${reason?.message || 'Some updates failed; retry the remaining selection.'}`);
+    if (failure) {
+      setError(`${saved.length} of ${transactionIds.length} categories saved. ${failure.message || 'Some updates failed; retry the remaining selection.'}`);
     }
     return saved.map((transaction) => transaction.id);
   }

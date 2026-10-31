@@ -85,7 +85,7 @@ Vite serves the frontend at `http://localhost:5173` and proxies `/api` requests 
 | `PORT` | `4000` | Set automatically by Render. The server binds to `0.0.0.0`. |
 | `MONGODB_URI` | Required | Store the Atlas connection string as a private Render environment variable. Never commit it or put it in frontend code. |
 | `MONGODB_DATABASE` | `expense_quest` | Database name used by the API. |
-| `FRONTEND_ORIGIN` | Local Vite origins and the live app origin | Comma-separated list of exact browser origins allowed by CORS. In production, use `https://expense-quest-qxabon.v2.appdeploy.ai`. |
+| `FRONTEND_ORIGIN` | Local Vite origins and the live app origins | Comma-separated list of exact browser origins allowed by CORS. Production currently allows the AppDeploy URLs for this project. |
 | `MAX_UPLOAD_MB` | `5` | Maximum CSV upload size in megabytes. |
 | `MAX_CSV_ROWS` | `5000` | Maximum transactions accepted in a single quest (hard-capped at 10,000). |
 | `VITE_API_URL` | API default in the frontend | Optional public API base URL. Defaults to the production API in a production build; it must never contain credentials. |
@@ -179,7 +179,7 @@ Build the frontend with `npm run build` and publish the updated frontend through
 
 ## Privacy and security
 
-Accounts now use salted scrypt password hashes and opaque, revocable bearer sessions. Quest, transaction, player, report, export, and budget operations are scoped to the authenticated account. The sample CSV contains synthetic merchant names and amounts; use it for the public walkthrough. Legacy records created before account isolation have no owner and are intentionally not exposed to newly created accounts. The app does not provide email verification, password reset, or financial-advice services; avoid uploading files you are not authorized to process.
+Accounts now use salted scrypt password hashes and opaque, revocable bearer sessions. Quest, transaction, player, report, export, and budget operations are scoped to the authenticated account. The API adds clickjacking, MIME-sniffing, and referrer-policy response headers, and applies bounded login/register throttling by source IP and a one-way hash of the normalized email. The sample CSV contains synthetic merchant names and amounts; use it for the public walkthrough. Legacy records created before account isolation have no owner and are intentionally not exposed to newly created accounts. The app does not provide email verification, password reset, or financial-advice services; avoid uploading files you are not authorized to process.
 
 For local development, keep `.env` and database credentials out of commits. Integration tests only accept `TEST_MONGODB_URI` whose database name begins `expense_quest_test_`; the suite drops that database when finished. Never set it to a production URI. GitHub Actions starts an isolated MongoDB replica set for the full integration run.
 

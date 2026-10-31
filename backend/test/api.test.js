@@ -55,13 +55,16 @@ describe(
       const headers = new Headers(options.headers || {});
       if (auth && token) headers.set('Authorization', `Bearer ${token}`);
       const response = await fetch(base + url, { ...options, headers });
-      return { status: response.status, data: await response.json() };
+      return { status: response.status, headers: response.headers, data: await response.json() };
     }
 
     test('health endpoint is live', async () => {
       const response = await json('/api/health');
       assert.equal(response.status, 200);
       assert.equal(response.data.status, 'ok');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(response.headers.get('x-frame-options'), 'DENY');
+      assert.equal(response.headers.get('x-powered-by'), null);
     });
 
     test('private routes require an account; signup and sessions work', async () => {
@@ -202,6 +205,40 @@ describe(
       data = await response.json();
       assert.equal(response.status, 409);
       assert.match(data.error, /already imported/);
+    });
+
+    test('transaction pagination returns bounded rows and accurate totals', async () => {
+      const firstPage = await json(`/api/quests/${questId}/transactions?page=1&limit=2`);
+      assert.equal(firstPage.status, 200);
+      assert.equal(firstPage.data.transactions.length, 2);
+      assert.deepEqual(firstPage.data.pagination, {
+        page: 1,
+        limit: 2,
+        total: 3,
+        totalPages: 2,
+      });
+      const secondPage = await json(`/api/quests/${questId}/transactions?page=2&limit=2`);
+      assert.equal(secondPage.data.transactions.length, 1);
+      assert.notEqual(secondPage.data.transactions[0].id, firstPage.data.transactions[1].id);
+    });
+
+    test('bulk category correction updates only the authenticated account transactions', async () => {
+      const corrected = await json('/api/transactions/categories', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionIds: [transactionId, skippedTransactionId], category: 'Shopping' }),
+      });
+      assert.equal(corrected.status, 200);
+      assert.equal(corrected.data.transactions.length, 2);
+      assert.ok(corrected.data.transactions.every((item) => item.category === 'Shopping'));
+
+      const isolated = await json('/api/transactions/categories', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionIds: [transactionId], category: 'Travel' }),
+      }, { token: secondUserToken });
+      assert.equal(isolated.status, 200);
+      assert.deepEqual(isolated.data.transactions, []);
     });
 
     test('skip state persists and can be resumed without XP', async () => {
