@@ -1,35 +1,48 @@
 'use strict';
 
-require('dotenv').config({ path: require('node:path').resolve(__dirname, '../../.env') });
+require('dotenv').config({
+  path: require('node:path').resolve(__dirname, '../../.env'),
+});
 
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const db = require('./db');
-const { parseExpenses } = require('./csv');
+const { parseExpenses, monthKeyFromDate } = require('./csv');
 const { categories } = require('./categorize');
 
 const app = express();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: (Number(process.env.MAX_UPLOAD_MB) || 5) * 1024 * 1024, files: 1 },
+  limits: {
+    fileSize: (Number(process.env.MAX_UPLOAD_MB) || 5) * 1024 * 1024,
+    files: 1,
+  },
   fileFilter(_req, file, callback) {
-    if (file.mimetype === 'text/csv' || file.originalname.toLowerCase().endsWith('.csv')) {
+    if (
+      file.mimetype === 'text/csv' ||
+      file.originalname.toLowerCase().endsWith('.csv')
+    ) {
       callback(null, true);
     } else {
-      callback(Object.assign(new Error('Upload a .csv file.'), { status: 400 }));
+      callback(
+        Object.assign(new Error('Upload a .csv file.'), { status: 400 }),
+      );
     }
   },
 });
 
-const origin = process.env.FRONTEND_ORIGIN
-  || 'http://localhost:3000,http://localhost:5173,https://expense-quest-qxabon.v2.appdeploy.ai';
+const origin =
+  process.env.FRONTEND_ORIGIN ||
+  'http://localhost:3000,http://localhost:5173,https://expense-quest-qxabon.v2.appdeploy.ai';
 
-app.use(cors({
-  origin: origin.split(',').map((value) => value.trim()),
-  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-}));
+app.use(
+  cors({
+    origin: origin.split(',').map((value) => value.trim()),
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type'],
+  }),
+);
 app.use(express.json({ limit: '32kb' }));
 
 class HttpError extends Error {
@@ -59,7 +72,9 @@ function questView(quest) {
       reviewed,
       total,
       percent: total ? Math.round((reviewed / total) * 100) : 100,
-      bossHealth: total ? Math.max(0, 100 - Math.floor((reviewed / total) * 100)) : 0,
+      bossHealth: total
+        ? Math.max(0, 100 - Math.floor((reviewed / total) * 100))
+        : 0,
       completed: quest.status === 'completed',
     },
   };
@@ -103,7 +118,12 @@ app.get('/api/health', async (_req, res) => {
 
 app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ success: false, error: 'Attach a CSV file using the "file" field.' });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: 'Attach a CSV file using the "file" field.',
+      });
   }
 
   const rows = parseExpenses(req.file.buffer);
@@ -118,7 +138,11 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
     };
     await db.quests.insertOne(quest, { session });
 
-    const transactionIds = await db.reserveIds('transaction', rows.length, session);
+    const transactionIds = await db.reserveIds(
+      'transaction',
+      rows.length,
+      session,
+    );
     const transactions = rows.map((row, index) => ({
       _id: transactionIds[index],
       quest_id: questId,
@@ -131,7 +155,8 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
       reviewed_at: null,
     }));
 
-    if (transactions.length) await db.transactions.insertMany(transactions, { session });
+    if (transactions.length)
+      await db.transactions.insertMany(transactions, { session });
 
     return {
       quest,
@@ -147,47 +172,77 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
     };
   });
 
-  return res.status(201).json({ success: true, quest: questView(result.quest), preview: result.preview });
+  return res
+    .status(201)
+    .json({
+      success: true,
+      quest: questView(result.quest),
+      preview: result.preview,
+    });
 });
 
 app.get('/api/quests/:id', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && await getQuest(id);
-  if (!quest) return res.status(404).json({ success: false, error: 'Quest not found.' });
+  const quest = id && (await getQuest(id));
+  if (!quest)
+    return res.status(404).json({ success: false, error: 'Quest not found.' });
   return res.json({ success: true, quest: questView(quest) });
 });
 
 app.get('/api/quests/:id/transactions', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && await getQuest(id);
-  if (!quest) return res.status(404).json({ success: false, error: 'Quest not found.' });
+  const quest = id && (await getQuest(id));
+  if (!quest)
+    return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transactions = await db.transactions.find({ quest_id: id }).sort({ _id: 1 }).toArray();
-  return res.json({ success: true, transactions: transactions.map(transactionView) });
+  const transactions = await db.transactions
+    .find({ quest_id: id })
+    .sort({ _id: 1 })
+    .toArray();
+  return res.json({
+    success: true,
+    transactions: transactions.map(transactionView),
+  });
 });
 
 app.get('/api/quests/:id/transactions/next', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && await getQuest(id);
-  if (!quest) return res.status(404).json({ success: false, error: 'Quest not found.' });
+  const quest = id && (await getQuest(id));
+  if (!quest)
+    return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transaction = await db.transactions.findOne({ quest_id: id, reviewed: false }, { sort: { _id: 1 } });
-  return res.json({ success: true, transaction: transaction ? transactionView(transaction) : null });
+  const transaction = await db.transactions.findOne(
+    { quest_id: id, reviewed: false },
+    { sort: { _id: 1 } },
+  );
+  return res.json({
+    success: true,
+    transaction: transaction ? transactionView(transaction) : null,
+  });
 });
 
 app.patch('/api/transactions/:id', async (req, res) => {
   const id = validId(req.params.id);
-  if (!id) return res.status(400).json({ success: false, error: 'Invalid transaction ID.' });
+  if (!id)
+    return res
+      .status(400)
+      .json({ success: false, error: 'Invalid transaction ID.' });
 
   const category = req.body?.category;
   if (typeof category !== 'string' || !categories.includes(category)) {
-    return res.status(400).json({ success: false, error: `category must be one of: ${categories.join(', ')}.` });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: `category must be one of: ${categories.join(', ')}.`,
+      });
   }
 
   const result = await db.withTransaction(async (session) => {
     const transaction = await db.transactions.findOne({ _id: id }, { session });
     if (!transaction) throw new HttpError(404, 'Transaction not found.');
-    if (transaction.reviewed) throw new HttpError(409, 'Transaction has already been reviewed.');
+    if (transaction.reviewed)
+      throw new HttpError(409, 'Transaction has already been reviewed.');
 
     const quest = await getQuest(transaction.quest_id, session);
     if (!quest) throw new HttpError(404, 'Quest not found.');
@@ -195,13 +250,22 @@ app.patch('/api/transactions/:id', async (req, res) => {
     const reviewedAt = new Date();
     const update = await db.transactions.updateOne(
       { _id: id, reviewed: false },
-      { $set: { final_category: category, reviewed: true, reviewed_at: reviewedAt } },
+      {
+        $set: {
+          final_category: category,
+          reviewed: true,
+          reviewed_at: reviewedAt,
+        },
+      },
       { session },
     );
-    if (!update.modifiedCount) throw new HttpError(409, 'Transaction has already been reviewed.');
+    if (!update.modifiedCount)
+      throw new HttpError(409, 'Transaction has already been reviewed.');
 
     const reviewedCount = quest.reviewed_transactions + 1;
-    const completed = reviewedCount === quest.total_transactions && quest.status !== 'completed';
+    const completed =
+      reviewedCount === quest.total_transactions &&
+      quest.status !== 'completed';
     const questUpdate = { $inc: { reviewed_transactions: 1 } };
     if (completed) questUpdate.$set = { status: 'completed' };
     await db.quests.updateOne({ _id: quest._id }, questUpdate, { session });
@@ -231,7 +295,10 @@ app.patch('/api/transactions/:id', async (req, res) => {
   return res.json({
     success: true,
     transaction: transactionView(result.transaction),
-    player: { xp: result.player.xp, level: 1 + Math.floor(result.player.xp / 100) },
+    player: {
+      xp: result.player.xp,
+      level: 1 + Math.floor(result.player.xp / 100),
+    },
     quest: {
       reviewed: result.quest.reviewed_transactions,
       total: result.quest.total_transactions,
@@ -243,10 +310,18 @@ app.patch('/api/transactions/:id', async (req, res) => {
 
 app.post('/api/transactions/:id/skip', async (req, res) => {
   const id = validId(req.params.id);
-  const transaction = id && await db.transactions.findOne({ _id: id });
-  if (!transaction) return res.status(404).json({ success: false, error: 'Transaction not found.' });
+  const transaction = id && (await db.transactions.findOne({ _id: id }));
+  if (!transaction)
+    return res
+      .status(404)
+      .json({ success: false, error: 'Transaction not found.' });
   if (transaction.reviewed) {
-    return res.status(409).json({ success: false, error: 'Reviewed transaction cannot be skipped.' });
+    return res
+      .status(409)
+      .json({
+        success: false,
+        error: 'Reviewed transaction cannot be skipped.',
+      });
   }
   return res.json({
     success: true,
@@ -257,14 +332,19 @@ app.post('/api/transactions/:id/skip', async (req, res) => {
 
 app.post('/api/transactions/:id/undo', async (req, res) => {
   const id = validId(req.params.id);
-  if (!id) return res.status(404).json({ success: false, error: 'Transaction not found.' });
+  if (!id)
+    return res
+      .status(404)
+      .json({ success: false, error: 'Transaction not found.' });
 
   const result = await db.withTransaction(async (session) => {
     const transaction = await db.transactions.findOne({ _id: id }, { session });
     if (!transaction) throw new HttpError(404, 'Transaction not found.');
-    if (!transaction.reviewed) throw new HttpError(409, 'Transaction is not reviewed.');
+    if (!transaction.reviewed)
+      throw new HttpError(409, 'Transaction is not reviewed.');
 
-    const latest = await db.transactions.find({ quest_id: transaction.quest_id, reviewed: true }, { session })
+    const latest = await db.transactions
+      .find({ quest_id: transaction.quest_id, reviewed: true }, { session })
       .sort({ reviewed_at: -1, _id: -1 })
       .limit(1)
       .next();
@@ -281,7 +361,8 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
       { $set: { reviewed: false, reviewed_at: null } },
       { returnDocument: 'after', includeResultMetadata: false, session },
     );
-    if (!updatedTransaction) throw new HttpError(409, 'Transaction is not reviewed.');
+    if (!updatedTransaction)
+      throw new HttpError(409, 'Transaction is not reviewed.');
 
     await db.quests.updateOne(
       { _id: quest._id },
@@ -292,9 +373,16 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
     const player = await db.players.findOne({ _id: 'player' }, { session });
     const updatedPlayer = {
       xp: Math.max(0, player.xp - 10),
-      quests_completed: Math.max(0, player.quests_completed - (wasCompleted ? 1 : 0)),
+      quests_completed: Math.max(
+        0,
+        player.quests_completed - (wasCompleted ? 1 : 0),
+      ),
     };
-    await db.players.updateOne({ _id: 'player' }, { $set: updatedPlayer }, { session });
+    await db.players.updateOne(
+      { _id: 'player' },
+      { $set: updatedPlayer },
+      { session },
+    );
 
     return {
       quest: {
@@ -310,7 +398,10 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
   return res.json({
     success: true,
     transaction: transactionView(result.transaction),
-    player: { xp: result.player.xp, level: 1 + Math.floor(result.player.xp / 100) },
+    player: {
+      xp: result.player.xp,
+      level: 1 + Math.floor(result.player.xp / 100),
+    },
     quest: questView(result.quest),
   });
 });
@@ -330,25 +421,37 @@ app.get('/api/player', async (_req, res) => {
 
 app.get('/api/quests/:id/report', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && await getQuest(id);
-  if (!quest) return res.status(404).json({ success: false, error: 'Quest not found.' });
+  const quest = id && (await getQuest(id));
+  if (!quest)
+    return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transactions = await db.transactions.find({ quest_id: id }).sort({ _id: 1 }).toArray();
-  const unroundedTotal = transactions.reduce((sum, transaction) => sum + transaction.amount, 0);
+  const transactions = await db.transactions
+    .find({ quest_id: id })
+    .sort({ _id: 1 })
+    .toArray();
+  const unroundedTotal = transactions.reduce(
+    (sum, transaction) => sum + transaction.amount,
+    0,
+  );
   const totalExpenses = roundCurrency(unroundedTotal);
   const categoryTotals = new Map();
   const monthlyTotals = new Map();
 
   for (const transaction of transactions) {
-    const current = categoryTotals.get(transaction.final_category) || { spending: 0, count: 0 };
+    const current = categoryTotals.get(transaction.final_category) || {
+      spending: 0,
+      count: 0,
+    };
     current.spending += transaction.amount;
     current.count += 1;
     categoryTotals.set(transaction.final_category, current);
 
-    if (typeof transaction.date === 'string' && transaction.date.length >= 7) {
-      const month = transaction.date.slice(0, 7);
-      monthlyTotals.set(month, (monthlyTotals.get(month) || 0) + transaction.amount);
-    }
+    const month = monthKeyFromDate(transaction.date);
+    if (month)
+      monthlyTotals.set(
+        month,
+        (monthlyTotals.get(month) || 0) + transaction.amount,
+      );
   }
 
   const categorySpending = [...categoryTotals.entries()]
@@ -373,11 +476,18 @@ app.get('/api/quests/:id/report', async (req, res) => {
       ? roundCurrency(unroundedTotal / transactions.length)
       : 0,
     largestTransaction: largest
-      ? { date: largest.date, description: largest.description, amount: largest.amount }
+      ? {
+          date: largest.date,
+          description: largest.description,
+          amount: largest.amount,
+        }
       : null,
     monthlySpending: [...monthlyTotals.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([month, spending]) => ({ month, spending: roundCurrency(spending) })),
+      .map(([month, spending]) => ({
+        month,
+        spending: roundCurrency(spending),
+      })),
   };
 
   return res.json({ success: true, report });
@@ -385,29 +495,39 @@ app.get('/api/quests/:id/report', async (req, res) => {
 
 app.get('/api/quests/:id/export', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && await getQuest(id);
-  if (!quest) return res.status(404).json({ success: false, error: 'Quest not found.' });
+  const quest = id && (await getQuest(id));
+  if (!quest)
+    return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transactions = await db.transactions.find({ quest_id: id }).sort({ _id: 1 }).toArray();
+  const transactions = await db.transactions
+    .find({ quest_id: id })
+    .sort({ _id: 1 })
+    .toArray();
   const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
   const csv = [
     'Date,Description,Amount,Suggested Category,Final Category,Reviewed',
-    ...transactions.map((transaction) => [
-      transaction.date,
-      transaction.description,
-      transaction.amount,
-      transaction.suggested_category,
-      transaction.final_category,
-      transaction.reviewed ? 'true' : 'false',
-    ].map(escapeCsv).join(',')),
+    ...transactions.map((transaction) =>
+      [
+        transaction.date,
+        transaction.description,
+        transaction.amount,
+        transaction.suggested_category,
+        transaction.final_category,
+        transaction.reviewed ? 'true' : 'false',
+      ]
+        .map(escapeCsv)
+        .join(','),
+    ),
   ].join('\r\n');
 
   return res.type('text/csv').attachment(`expense-quest-${id}.csv`).send(csv);
 });
 
 app.use((error, _req, res, _next) => {
-  const status = error.status || (error instanceof multer.MulterError ? 400 : 500);
-  if (status === 500) console.error(`Request failed (${error.name || 'Error'}).`);
+  const status =
+    error.status || (error instanceof multer.MulterError ? 400 : 500);
+  if (status === 500)
+    console.error(`Request failed (${error.name || 'Error'}).`);
   return res.status(status).json({
     success: false,
     error: status === 500 ? 'Internal server error.' : error.message,
@@ -435,7 +555,9 @@ async function start() {
 
 if (require.main === module) {
   start().catch((error) => {
-    console.error(`Expense Quest API failed to start (${error.name || 'Error'}). Check MongoDB settings and connectivity.`);
+    console.error(
+      `Expense Quest API failed to start (${error.name || 'Error'}). Check MongoDB settings and connectivity.`,
+    );
     process.exitCode = 1;
   });
 }
