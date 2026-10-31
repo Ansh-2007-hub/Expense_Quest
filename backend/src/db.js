@@ -31,7 +31,12 @@ async function connect() {
     await client.db('admin').command({ ping: 1 });
 
     const quests = database.collection('quests');
-    const oldIndexes = await quests.indexes();
+    let oldIndexes = [];
+    try {
+      oldIndexes = await quests.indexes();
+    } catch (error) {
+      if (error.code !== 26) throw error;
+    }
     if (oldIndexes.some((index) => index.name === 'quest_content_hash_unique')) {
       await quests.dropIndex('quest_content_hash_unique');
     }
