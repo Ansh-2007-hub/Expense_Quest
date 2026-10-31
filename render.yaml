@@ -15,7 +15,7 @@ services:
       - key: MONGODB_DATABASE
         value: expense_quest
       - key: FRONTEND_ORIGIN
-        value: https://expense-quest-qxabon.v2.appdeploy.ai
+        value: https://expense-quest-qxabon.v2.appdeploy.ai,https://expense-quest-uz0ijy.v2.appdeploy.ai
       - key: MAX_UPLOAD_MB
         value: "5"
       - key: MAX_CSV_ROWS

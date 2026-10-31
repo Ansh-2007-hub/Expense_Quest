@@ -54,10 +54,17 @@ const upload = multer({
 const origin =
   process.env.FRONTEND_ORIGIN ||
   'http://localhost:3000,http://localhost:5173,https://expense-quest-qxabon.v2.appdeploy.ai';
+const allowedOrigins = new Set([
+  ...origin.split(',').map((value) => value.trim()).filter(Boolean),
+  'https://expense-quest-qxabon.v2.appdeploy.ai',
+  'https://expense-quest-uz0ijy.v2.appdeploy.ai',
+]);
 
 app.use(
   cors({
-    origin: origin.split(',').map((value) => value.trim()),
+    origin(requestOrigin, callback) {
+      callback(null, !requestOrigin || allowedOrigins.has(requestOrigin));
+    },
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   }),
