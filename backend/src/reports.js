@@ -36,7 +36,7 @@ function monthKeyExpression() {
 }
 
 async function buildQuestReport(transactions, { userId, questId, currency }) {
-  const [result = {}] = await transactions.aggregate([
+  const result = await transactions.aggregate([
     { $match: { user_id: userId, quest_id: questId } },
     { $facet: {
       summary: [{ $group: { _id: null, totalTransactions: { $sum: 1 }, debitCount: { $sum: { $cond: [{ $ne: ['$direction', 'credit'] }, 1, 0] } }, debits: { $sum: { $cond: [{ $ne: ['$direction', 'credit'] }, '$amount', 0] } }, credits: { $sum: { $cond: [{ $eq: ['$direction', 'credit'] }, '$amount', 0] } } } }],
@@ -45,7 +45,7 @@ async function buildQuestReport(transactions, { userId, questId, currency }) {
       top: [{ $match: { direction: { $ne: 'credit' } } }, { $sort: { amount: -1, _id: 1 } }, { $limit: 5 }, { $project: { _id: 0, date: 1, description: 1, amount: 1, category: '$final_category', currency: { $ifNull: ['$currency', currency || null] } } }],
       monthly: [{ $match: { direction: { $ne: 'credit' } } }, { $set: { month: monthKeyExpression() } }, { $match: { month: { $ne: null } } }, { $group: { _id: '$month', spending: { $sum: '$amount' } } }, { $sort: { _id: 1 } }],
     } },
-  ]).next();
+  ]).next() || {};
   const summary = result.summary?.[0] || { totalTransactions: 0, debitCount: 0, debits: 0, credits: 0 };
   const categories = (result.categories || []).map((row) => ({ category: row._id, spending: roundCurrency(row.spending, currency), count: row.count }));
   const topTransactions = result.top || [];
