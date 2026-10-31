@@ -1,8 +1,110 @@
-const fs=require('node:fs'),path=require('node:path'),{DatabaseSync}=require('node:sqlite');
-const file=process.env.DATABASE_PATH||'./data/expense-quest.sqlite';
-if(process.env.NODE_ENV==='production'&&!path.isAbsolute(file))throw new Error('DATABASE_PATH must be an absolute path on persistent storage in production.');
-if(file!==':memory:')fs.mkdirSync(path.dirname(path.resolve(file)),{recursive:true});
-const db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
-db.transaction=fn=>(...args)=>{db.exec('BEGIN IMMEDIATE');try{const out=fn(...args);db.exec('COMMIT');return out}catch(e){db.exec('ROLLBACK');throw e}};
-db.exec(`CREATE TABLE IF NOT EXISTS player(id INTEGER PRIMARY KEY CHECK(id=1),xp INTEGER NOT NULL DEFAULT 0,quests_completed INTEGER NOT NULL DEFAULT 0);INSERT OR IGNORE INTO player(id) VALUES(1);CREATE TABLE IF NOT EXISTS quests(id INTEGER PRIMARY KEY AUTOINCREMENT,total_transactions INTEGER NOT NULL,reviewed_transactions INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed')),created_at TEXT NOT NULL DEFAULT(datetime('now')));CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,date TEXT,description TEXT NOT NULL,amount REAL NOT NULL CHECK(amount>=0),suggested_category TEXT NOT NULL,final_category TEXT NOT NULL,reviewed INTEGER NOT NULL DEFAULT 0 CHECK(reviewed IN(0,1)),reviewed_at TEXT);CREATE INDEX IF NOT EXISTS idx_transactions_quest_reviewed ON transactions(quest_id,reviewed,id);CREATE INDEX IF NOT EXISTS idx_transactions_quest_category ON transactions(quest_id,final_category);`);
-module.exports=db;
+'use strict';
+
+const { MongoClient } = require('mongodb');
+
+let client;
+let database;
+
+function getDatabase() {
+  if (!database) throw new Error('MongoDB is not connected.');
+  return database;
+}
+
+function getCollection(name) {
+  return getDatabase().collection(name);
+}
+
+async function connect() {
+  if (database) return database;
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) throw new Error('MONGODB_URI is required.');
+
+  client = new MongoClient(uri, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 10000,
+  });
+
+  try {
+    await client.connect();
+    database = client.db(process.env.MONGODB_DATABASE || 'expense_quest');
+    await client.db('admin').command({ ping: 1 });
+
+    await Promise.all([
+      database.collection('transactions').createIndex({ quest_id: 1, _id: 1 }),
+      database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, _id: 1 }),
+      database.collection('transactions').createIndex({ quest_id: 1, final_category: 1 }),
+      database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, reviewed_at: -1, _id: -1 }),
+      database.collection('quests').createIndex({ status: 1, created_at: -1 }),
+    ]);
+
+    await database.collection('players').updateOne(
+      { _id: 'player' },
+      { $setOnInsert: { xp: 0, quests_completed: 0 } },
+      { upsert: true },
+    );
+
+    return database;
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+async function close() {
+  const currentClient = client;
+  client = undefined;
+  database = undefined;
+  if (currentClient) await currentClient.close();
+}
+
+async function ping() {
+  getDatabase();
+  await client.db('admin').command({ ping: 1 });
+}
+
+async function withTransaction(work) {
+  if (!client) throw new Error('MongoDB is not connected.');
+  const session = client.startSession();
+  try {
+    return await session.withTransaction(() => work(session));
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function reserveIds(counterName, count, session) {
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new TypeError('ID reservation count must be a non-negative safe integer.');
+  }
+  if (count === 0) return [];
+
+  const counter = await getCollection('counters').findOneAndUpdate(
+    { _id: counterName },
+    { $inc: { seq: count } },
+    { upsert: true, returnDocument: 'after', includeResultMetadata: false, session },
+  );
+  if (!counter) throw new Error(`Unable to reserve ${counterName} identifiers.`);
+
+  const firstId = counter.seq - count + 1;
+  return Array.from({ length: count }, (_, index) => firstId + index);
+}
+
+async function dropDatabase() {
+  await getDatabase().dropDatabase();
+}
+
+const db = {
+  connect,
+  close,
+  ping,
+  withTransaction,
+  reserveIds,
+  dropDatabase,
+};
+
+for (const name of ['counters', 'players', 'quests', 'transactions']) {
+  Object.defineProperty(db, name, { enumerable: true, get: () => getCollection(name) });
+}
+
+module.exports = db;
