@@ -1,7 +1,7 @@
 'use strict';
 
 const { parse } = require('csv-parse/sync');
-const { categorize } = require('./categorize');
+const { suggestCategory } = require('./categorize');
 
 const normalizeHeader = (value) =>
   String(value || '')
@@ -130,11 +130,13 @@ function parseExpenses(buffer) {
       );
     }
 
+    const suggestion = suggestCategory(description);
     expenses.push({
       date: rawDate || null,
       description,
       amount,
-      suggested_category: categorize(description),
+      suggested_category: suggestion.category,
+      suggestion_reason: suggestion.reason,
     });
   });
 

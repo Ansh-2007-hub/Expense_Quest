@@ -88,8 +88,12 @@ function transactionView(transaction) {
     description: transaction.description,
     amount: transaction.amount,
     suggestedCategory: transaction.suggested_category,
+    suggestionReason:
+      transaction.suggestion_reason ||
+      'This category was suggested by the merchant rules.',
     category: transaction.final_category,
     reviewed: Boolean(transaction.reviewed),
+    skipped: Boolean(transaction.skipped),
     reviewedAt: databaseTimestamp(transaction.reviewed_at),
   };
 }
@@ -116,14 +120,33 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+app.post('/api/quests/preview', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      success: false,
+      error: 'Attach a CSV file using the "file" field.',
+    });
+  }
+
+  const rows = parseExpenses(req.file.buffer);
+  return res.json({
+    success: true,
+    preview: rows.map((row) => ({
+      date: row.date,
+      description: row.description,
+      amount: row.amount,
+      suggestedCategory: row.suggested_category,
+      suggestionReason: row.suggestion_reason,
+    })),
+  });
+});
+
 app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
   if (!req.file) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        error: 'Attach a CSV file using the "file" field.',
-      });
+    return res.status(400).json({
+      success: false,
+      error: 'Attach a CSV file using the "file" field.',
+    });
   }
 
   const rows = parseExpenses(req.file.buffer);
@@ -150,8 +173,10 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
       description: row.description,
       amount: row.amount,
       suggested_category: row.suggested_category,
+      suggestion_reason: row.suggestion_reason,
       final_category: row.suggested_category,
       reviewed: false,
+      skipped: false,
       reviewed_at: null,
     }));
 
@@ -166,19 +191,19 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
         description: transaction.description,
         amount: transaction.amount,
         suggestedCategory: transaction.suggested_category,
+        suggestionReason: transaction.suggestion_reason,
         finalCategory: transaction.suggested_category,
         reviewed: false,
+        skipped: false,
       })),
     };
   });
 
-  return res
-    .status(201)
-    .json({
-      success: true,
-      quest: questView(result.quest),
-      preview: result.preview,
-    });
+  return res.status(201).json({
+    success: true,
+    quest: questView(result.quest),
+    preview: result.preview,
+  });
 });
 
 app.get('/api/quests/:id', async (req, res) => {
@@ -212,7 +237,7 @@ app.get('/api/quests/:id/transactions/next', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
   const transaction = await db.transactions.findOne(
-    { quest_id: id, reviewed: false },
+    { quest_id: id, reviewed: false, skipped: { $ne: true } },
     { sort: { _id: 1 } },
   );
   return res.json({
@@ -230,12 +255,10 @@ app.patch('/api/transactions/:id', async (req, res) => {
 
   const category = req.body?.category;
   if (typeof category !== 'string' || !categories.includes(category)) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        error: `category must be one of: ${categories.join(', ')}.`,
-      });
+    return res.status(400).json({
+      success: false,
+      error: `category must be one of: ${categories.join(', ')}.`,
+    });
   }
 
   const result = await db.withTransaction(async (session) => {
@@ -254,6 +277,7 @@ app.patch('/api/transactions/:id', async (req, res) => {
         $set: {
           final_category: category,
           reviewed: true,
+          skipped: false,
           reviewed_at: reviewedAt,
         },
       },
@@ -308,6 +332,33 @@ app.patch('/api/transactions/:id', async (req, res) => {
   });
 });
 
+app.patch('/api/transactions/:id/category', async (req, res) => {
+  const id = validId(req.params.id);
+  if (!id) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'Invalid transaction ID.' });
+  }
+  const category = req.body?.category;
+  if (typeof category !== 'string' || !categories.includes(category)) {
+    return res.status(400).json({
+      success: false,
+      error: `category must be one of: ${categories.join(', ')}.`,
+    });
+  }
+  const transaction = await db.transactions.findOneAndUpdate(
+    { _id: id },
+    { $set: { final_category: category } },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+  if (!transaction) {
+    return res
+      .status(404)
+      .json({ success: false, error: 'Transaction not found.' });
+  }
+  return res.json({ success: true, transaction: transactionView(transaction) });
+});
+
 app.post('/api/transactions/:id/skip', async (req, res) => {
   const id = validId(req.params.id);
   const transaction = id && (await db.transactions.findOne({ _id: id }));
@@ -323,11 +374,50 @@ app.post('/api/transactions/:id/skip', async (req, res) => {
         error: 'Reviewed transaction cannot be skipped.',
       });
   }
+  const updated = await db.transactions.findOneAndUpdate(
+    { _id: id, reviewed: false },
+    { $set: { skipped: true } },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+  if (!updated)
+    return res
+      .status(409)
+      .json({
+        success: false,
+        error: 'Reviewed transaction cannot be skipped.',
+      });
   return res.json({
     success: true,
-    transaction: transactionView(transaction),
+    transaction: transactionView(updated),
     message: 'Skipped; no XP awarded.',
   });
+});
+
+app.post('/api/transactions/:id/unskip', async (req, res) => {
+  const id = validId(req.params.id);
+  if (!id)
+    return res
+      .status(400)
+      .json({ success: false, error: 'Invalid transaction ID.' });
+  const updated = await db.transactions.findOneAndUpdate(
+    { _id: id, reviewed: false },
+    { $set: { skipped: false } },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+  if (!updated) {
+    const transaction = await db.transactions.findOne({ _id: id });
+    if (!transaction)
+      return res
+        .status(404)
+        .json({ success: false, error: 'Transaction not found.' });
+    return res
+      .status(409)
+      .json({
+        success: false,
+        error: 'Reviewed transaction cannot be resumed.',
+      });
+  }
+  return res.json({ success: true, transaction: transactionView(updated) });
 });
 
 app.post('/api/transactions/:id/undo', async (req, res) => {
@@ -358,7 +448,7 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
     const wasCompleted = quest.status === 'completed';
     const updatedTransaction = await db.transactions.findOneAndUpdate(
       { _id: id, reviewed: true },
-      { $set: { reviewed: false, reviewed_at: null } },
+      { $set: { reviewed: false, skipped: false, reviewed_at: null } },
       { returnDocument: 'after', includeResultMetadata: false, session },
     );
     if (!updatedTransaction)
@@ -414,7 +504,11 @@ app.get('/api/player', async (_req, res) => {
       xp: player.xp,
       level: 1 + Math.floor(player.xp / 100),
       questsCompleted: player.quests_completed,
-      achievements: player.quests_completed ? ['First Quest Complete'] : [],
+      achievements: [
+        ...(player.xp >= 10 ? ['First Review'] : []),
+        ...(player.quests_completed >= 1 ? ['Dragon Slayer'] : []),
+        ...(player.quests_completed >= 5 ? ['Five Quests Cleared'] : []),
+      ],
     },
   });
 });
@@ -436,6 +530,7 @@ app.get('/api/quests/:id/report', async (req, res) => {
   const totalExpenses = roundCurrency(unroundedTotal);
   const categoryTotals = new Map();
   const monthlyTotals = new Map();
+  const merchantTotals = new Map();
 
   for (const transaction of transactions) {
     const current = categoryTotals.get(transaction.final_category) || {
@@ -445,6 +540,17 @@ app.get('/api/quests/:id/report', async (req, res) => {
     current.spending += transaction.amount;
     current.count += 1;
     categoryTotals.set(transaction.final_category, current);
+
+    const merchantName = String(transaction.description || '').trim();
+    const merchantKey = merchantName.toLocaleLowerCase();
+    const merchant = merchantTotals.get(merchantKey) || {
+      merchant: merchantName,
+      spending: 0,
+      count: 0,
+    };
+    merchant.spending += transaction.amount;
+    merchant.count += 1;
+    merchantTotals.set(merchantKey, merchant);
 
     const month = monthKeyFromDate(transaction.date);
     if (month)
@@ -466,11 +572,31 @@ app.get('/api/quests/:id/report', async (req, res) => {
     const amountDifference = right.amount - left.amount;
     return amountDifference || left._id - right._id;
   })[0];
+  const topTransactions = [...transactions]
+    .sort((left, right) => {
+      const amountDifference = right.amount - left.amount;
+      return amountDifference || left._id - right._id;
+    })
+    .slice(0, 5)
+    .map((transaction) => ({
+      date: transaction.date,
+      description: transaction.description,
+      amount: transaction.amount,
+      category: transaction.final_category,
+    }));
 
   const report = {
     totalExpenses,
     totalTransactions: transactions.length,
     categorySpending,
+    topMerchants: [...merchantTotals.values()]
+      .sort((left, right) => right.spending - left.spending)
+      .slice(0, 5)
+      .map((merchant) => ({
+        ...merchant,
+        spending: roundCurrency(merchant.spending),
+      })),
+    topTransactions,
     highestSpendingCategory: categorySpending[0]?.category || null,
     averageTransactionAmount: transactions.length
       ? roundCurrency(unroundedTotal / transactions.length)

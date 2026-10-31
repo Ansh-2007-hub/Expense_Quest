@@ -2,7 +2,11 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { categorize, categories } = require('../src/categorize');
+const {
+  categorize,
+  categories,
+  suggestCategory,
+} = require('../src/categorize');
 const { parseExpenses, isValidDate, monthKeyFromDate } = require('../src/csv');
 
 test('category suggestions preserve the API category order and resolve common merchants', () => {
@@ -24,6 +28,11 @@ test('category suggestions preserve the API category order and resolve common me
   assert.equal(categorize('Apollo Pharmacy'), 'Healthcare');
   assert.equal(categorize('University course'), 'Education');
   assert.equal(categorize('Unknown merchant'), 'Other');
+  assert.match(suggestCategory('Uber Eats dinner').reason, /Uber Eats/);
+  assert.match(
+    suggestCategory('Unknown merchant').reason,
+    /No merchant rule matched/,
+  );
 });
 
 test('CSV parser supports aliased headers, quoted amounts, BOM and preserves valid dates', () => {
@@ -35,6 +44,7 @@ test('CSV parser supports aliased headers, quoted amounts, BOM and preserves val
     description: 'Uber Eats dinner',
     amount: 1250.5,
     suggested_category: 'Food',
+    suggestion_reason: 'Matched “Uber Eats” to the Food rule.',
   });
 });
 

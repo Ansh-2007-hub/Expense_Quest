@@ -21,12 +21,29 @@ const rules = [
   ['Education', /school|college|course|books|tuition|university/i],
 ];
 
-function categorize(description) {
+function suggestCategory(description) {
   const merchant = String(description || '').trim();
-  return rules.find(([, pattern]) => pattern.test(merchant))?.[0] || 'Other';
+  for (const [category, pattern] of rules) {
+    const match = merchant.match(pattern);
+    if (match) {
+      return {
+        category,
+        reason: `Matched “${match[0]}” to the ${category} rule.`,
+      };
+    }
+  }
+  return {
+    category: 'Other',
+    reason: 'No merchant rule matched. Choose the category that fits.',
+  };
+}
+
+function categorize(description) {
+  return suggestCategory(description).category;
 }
 
 module.exports = {
   categorize,
+  suggestCategory,
   categories: [...rules.map(([category]) => category), 'Other'],
 };
