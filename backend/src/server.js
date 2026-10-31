@@ -901,8 +901,10 @@ app.use((error, _req, res, _next) => {
   const status =
     error.status ||
     (error instanceof multer.MulterError ? 400 : error.code === 11000 ? 409 : 500);
-  if (status === 500)
-    console.error(`Request failed (${error.name || 'Error'}).`);
+  if (status === 500) {
+    const detail = String(error.message || '').replace(/[\r\n]/g, ' ').slice(0, 240);
+    console.error(`Request failed (${error.name || 'Error'}): ${detail}`);
+  }
   return res.status(status).json({
     success: false,
     error:

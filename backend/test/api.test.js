@@ -312,6 +312,7 @@ describe(
       assert.deepEqual(player.data.player.achievements, ['First Review']);
 
       const report = await json(`/api/quests/${questId}/report`);
+      assert.equal(report.status, 200, JSON.stringify(report.data));
       assert.equal(report.data.report.totalExpenses, 720.5);
       assert.equal(report.data.report.totalDebits, 720.5);
       assert.equal(report.data.report.totalCredits, 25);
