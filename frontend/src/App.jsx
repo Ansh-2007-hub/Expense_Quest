@@ -760,7 +760,7 @@ export default function App() {
     let failure;
     for (let index = 0; index < transactionIds.length; index += 100) {
       try {
-        const result = await api('/transactions/categories', {
+        const result = await api('/transactions/categories/bulk', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

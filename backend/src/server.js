@@ -660,7 +660,7 @@ app.patch('/api/transactions/:id/category', async (req, res) => {
   return res.json({ success: true, transaction: transactionView(transaction) });
 });
 
-app.patch('/api/transactions/categories', async (req, res) => {
+app.patch('/api/transactions/categories/bulk', async (req, res) => {
   const transactionIds = req.body?.transactionIds;
   const category = req.body?.category;
   if (!Array.isArray(transactionIds) || transactionIds.length < 1 || transactionIds.length > 100) {
@@ -877,7 +877,7 @@ app.get('/api/quests/:id/report', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
   const report = await buildQuestReport(db.transactions, { userId: req.user.id, questId: id, currency: quest.currency });
-
+  return res.json({ success: true, report });
 
 });
 

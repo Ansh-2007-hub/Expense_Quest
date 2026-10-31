@@ -18,7 +18,7 @@ Base URL: `http://localhost:4000`. JSON responses use `{ "success": true, ... }`
 | GET | `/api/quests/:id/transactions/next` | — | `{ success, transaction: Transaction | null }` |
 | PATCH | `/api/transactions/:id` | JSON `{ "category": "Food" }` | `{ success, transaction, player: { xp, level, questsCompleted, achievements }, quest: { reviewed, total, bossHealth, completed } }`; awards 10 XP once and returns server-derived achievements. |
 | PATCH | `/api/transactions/:id/category` | JSON `{ "category": "Food" }` | `{ success, transaction }`; corrects a category without reviewing the row or changing XP. |
-| PATCH | `/api/transactions/categories` | JSON `{ "transactionIds": [1, 2], "category": "Food" }` | `{ success, transactions }`; corrects 1–100 categories in one account-scoped request without changing XP. |
+| PATCH | `/api/transactions/categories/bulk` | JSON `{ "transactionIds": [1, 2], "category": "Food" }` | `{ success, transactions }`; corrects 1–100 categories in one account-scoped request without changing XP. |
 | POST | `/api/transactions/:id/skip` | — | `{ success, transaction, message }`; persists the skipped state without review or XP change. |
 | POST | `/api/transactions/:id/unskip` | — | `{ success, transaction }`; returns a skipped row to the review queue. |
 | POST | `/api/transactions/:id/undo` | — | `{ success, transaction, player, quest }`; only latest review can be undone. |

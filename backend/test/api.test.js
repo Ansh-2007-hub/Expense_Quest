@@ -223,7 +223,7 @@ describe(
     });
 
     test('bulk category correction updates only the authenticated account transactions', async () => {
-      const corrected = await json('/api/transactions/categories', {
+      const corrected = await json('/api/transactions/categories/bulk', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionIds: [transactionId, skippedTransactionId], category: 'Shopping' }),
@@ -232,7 +232,7 @@ describe(
       assert.equal(corrected.data.transactions.length, 2);
       assert.ok(corrected.data.transactions.every((item) => item.category === 'Shopping'));
 
-      const isolated = await json('/api/transactions/categories', {
+      const isolated = await json('/api/transactions/categories/bulk', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionIds: [transactionId], category: 'Travel' }),
