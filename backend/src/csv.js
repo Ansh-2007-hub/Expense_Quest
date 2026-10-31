@@ -1,7 +1,7 @@
 'use strict';
 
 const { parse } = require('csv-parse/sync');
-const { suggestCategory } = require('./categorize');
+const { categories, suggestCategory } = require('./categorize');
 
 const normalizeHeader = (value) =>
   String(value || '')
@@ -9,7 +9,7 @@ const normalizeHeader = (value) =>
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
 const headerAliases = {
-  date: ['date', 'transactiondate', 'transdate', 'purchasedate'],
+  date: ['date', 'transactiondate', 'transdate', 'purchasedate', 'posteddate', 'valuedate'],
   description: [
     'description',
     'merchant',
@@ -17,9 +17,85 @@ const headerAliases = {
     'payee',
     'transaction',
     'details',
+    'narration',
+    'transactiondetails',
+    'transactiondescription',
+    'merchantname',
   ],
   amount: ['amount', 'value', 'total', 'transactionamount'],
+  debit: ['debit', 'withdrawal', 'outflow', 'moneyout', 'debitamount', 'withdrawalamount', 'outflowamount'],
+  credit: ['credit', 'deposit', 'inflow', 'moneyin', 'creditamount', 'depositamount', 'inflowamount'],
+  currency: ['currency', 'currencycode', 'ccy'],
+  category: ['category', 'finalcategory', 'expensecategory'],
+  direction: ['direction', 'type', 'transactiontype', 'debitcredit'],
 };
+
+function parseAmount(value) {
+  let raw = String(value || '').trim();
+  if (!raw) return null;
+  const parenthesized = /^\(.*\)$/.test(raw);
+  const explicitlyNegative = parenthesized || raw.startsWith('-');
+  raw = raw
+    .replace(/[()]/g, '')
+    .replace(/\b[A-Z]{3}\b/gi, '')
+    .replace(/[$€£₹¥₩₽\s']/g, '')
+    .replace(/^[+-]/, '');
+  if (/[+-]/.test(raw)) return null;
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot = raw.lastIndexOf('.');
+  if (lastComma >= 0 && lastDot >= 0) {
+    const decimalSeparator = lastComma > lastDot ? ',' : '.';
+    const groupingSeparator = decimalSeparator === ',' ? '.' : ',';
+    const fractionLength = raw.length - raw.lastIndexOf(decimalSeparator) - 1;
+    raw = raw.replaceAll(groupingSeparator, '');
+    if (decimalSeparator === ',' && fractionLength > 0 && fractionLength <= 3)
+      raw = raw.replace(',', '.');
+  } else if (lastComma >= 0) {
+    const fractionLength = raw.length - lastComma - 1;
+    raw = fractionLength > 0 && fractionLength <= 2
+      ? `${raw.slice(0, lastComma).replaceAll(',', '')}.${raw.slice(lastComma + 1)}`
+      : raw.replaceAll(',', '');
+  } else if ((raw.match(/\./g) || []).length > 1) {
+    const lastPeriod = raw.lastIndexOf('.');
+    const fractionLength = raw.length - lastPeriod - 1;
+    raw = fractionLength === 3
+      ? raw.replaceAll('.', '')
+      : `${raw.slice(0, lastPeriod).replaceAll('.', '')}.${raw.slice(lastPeriod + 1)}`;
+  }
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const amount = Number(raw);
+  return Number.isFinite(amount)
+    ? parenthesized || explicitlyNegative
+      ? -amount
+      : amount
+    : null;
+}
+
+function detectCurrency(value) {
+  const input = String(value || '').trim();
+  const code = input.match(/\b([A-Z]{3})\b/i)?.[1]?.toUpperCase();
+  if (code) return code;
+  if (input.includes('₹')) return 'INR';
+  if (input.includes('€')) return 'EUR';
+  if (input.includes('£')) return 'GBP';
+  return '';
+}
+
+function isCurrencyCode(value) {
+  const currency = String(value || '').toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) return false;
+  return typeof Intl.supportedValuesOf !== 'function' ||
+    Intl.supportedValuesOf('currency').includes(currency);
+}
+
+function normalizeDirection(value) {
+  const input = String(value || '').trim().toLowerCase();
+  if (['debit', 'expense', 'outflow', 'withdrawal', 'dr'].includes(input))
+    return 'debit';
+  if (['credit', 'income', 'inflow', 'deposit', 'refund', 'cr'].includes(input))
+    return 'credit';
+  return null;
+}
 
 function validCalendarDate(year, month, day) {
   const fullYear = year < 100 ? (year < 70 ? 2000 + year : 1900 + year) : year;
@@ -105,23 +181,83 @@ function parseExpenses(buffer) {
   const dateColumn = findColumn(headerAliases.date);
   const descriptionColumn = findColumn(headerAliases.description);
   const amountColumn = findColumn(headerAliases.amount);
-  if (!descriptionColumn || !amountColumn) {
+  const debitColumn = findColumn(headerAliases.debit);
+  const creditColumn = findColumn(headerAliases.credit);
+  const currencyColumn = findColumn(headerAliases.currency);
+  const categoryColumn = findColumn(headerAliases.category);
+  const directionColumn = findColumn(headerAliases.direction);
+  if (!descriptionColumn || (!amountColumn && !debitColumn && !creditColumn)) {
     throw csvError(
-      'Required columns: Description (or Merchant) and Amount. Date is optional.',
+      'Required columns: Description (or Merchant) and Amount, Debit, or Credit. Date is optional.',
     );
   }
 
   const expenses = [];
+  const currencies = new Set();
   rows.forEach((row, index) => {
     const description = String(row[descriptionColumn] || '').trim();
     const rawAmount = String(row[amountColumn] ?? '').trim();
+    const rawDebit = String(row[debitColumn] ?? '').trim();
+    const rawCredit = String(row[creditColumn] ?? '').trim();
     const rawDate = dateColumn ? String(row[dateColumn] || '').trim() : '';
-    if (!description && !rawAmount && !rawDate) return;
+    const rawDirection = directionColumn
+      ? String(row[directionColumn] || '').trim()
+      : '';
+    const rawCurrency = currencyColumn
+      ? String(row[currencyColumn] || '').trim()
+      : '';
+    const rawCategory = categoryColumn
+      ? String(row[categoryColumn] || '').trim()
+      : '';
+    if (
+      !description &&
+      !rawAmount &&
+      !rawDebit &&
+      !rawCredit &&
+      !rawDate
+    )
+      return;
 
-    const amount = Number(rawAmount.replace(/[$₹,\s]/g, ''));
-    if (!description || !rawAmount || !Number.isFinite(amount) || amount < 0) {
+    const amountValue = rawAmount ? parseAmount(rawAmount) : null;
+    const debitValue = rawDebit ? parseAmount(rawDebit) : null;
+    const creditValue = rawCredit ? parseAmount(rawCredit) : null;
+    const debitEntered = rawDebit !== '';
+    const creditEntered = rawCredit !== '';
+    const debitPresent = debitEntered && debitValue != null && debitValue !== 0;
+    const creditPresent = creditEntered && creditValue != null && creditValue !== 0;
+    if (debitPresent && creditPresent) {
       throw csvError(
-        `Invalid expense on CSV row ${index + 2}: description and non-negative numeric amount are required.`,
+        `CSV row ${index + 2} contains both debit and credit amounts.`,
+      );
+    }
+    if (
+      (rawAmount && amountValue == null) ||
+      (rawDebit && debitValue == null) ||
+      (rawCredit && creditValue == null)
+    ) {
+      throw csvError(`Invalid amount on CSV row ${index + 2}.`);
+    }
+    let direction = amountValue != null && amountValue < 0 ? 'credit' : 'debit';
+    let selectedAmount = amountValue;
+    if (debitPresent || creditPresent) {
+      selectedAmount = debitPresent ? debitValue : creditValue;
+      direction = creditPresent ? 'credit' : 'debit';
+      if (selectedAmount < 0) direction = 'credit';
+    } else if (debitEntered || creditEntered) {
+      selectedAmount = debitEntered ? debitValue : creditValue;
+      direction = creditEntered ? 'credit' : 'debit';
+    }
+    const explicitDirection = normalizeDirection(rawDirection);
+    if (rawDirection && !explicitDirection) {
+      throw csvError(
+        `Invalid direction on CSV row ${index + 2}: use debit/expense or credit/income.`,
+      );
+    }
+    if (explicitDirection) direction = explicitDirection;
+    const amount = Math.abs(selectedAmount ?? 0);
+    if (!description || selectedAmount == null) {
+      throw csvError(
+        `Invalid expense on CSV row ${index + 2}: description and a numeric amount are required.`,
       );
     }
     if (rawDate && !isValidDate(rawDate)) {
@@ -130,18 +266,50 @@ function parseExpenses(buffer) {
       );
     }
 
+    const rawCurrencyCode = detectCurrency(rawCurrency);
+    const amountCurrencyCode = detectCurrency(rawAmount || rawDebit || rawCredit);
+    if (
+      rawCurrencyCode &&
+      amountCurrencyCode &&
+      rawCurrencyCode !== amountCurrencyCode
+    ) {
+      throw csvError(`Currency does not match the amount on CSV row ${index + 2}.`);
+    }
+    const detectedCurrency = rawCurrencyCode || amountCurrencyCode;
+    if (detectedCurrency && !isCurrencyCode(detectedCurrency)) {
+      throw csvError(`Enter a supported ISO currency code on CSV row ${index + 2}.`);
+    }
+    if (rawCurrency && !detectedCurrency) {
+      throw csvError(`Enter an ISO currency code on CSV row ${index + 2}.`);
+    }
+    if (detectedCurrency) currencies.add(detectedCurrency);
+    const category = rawCategory
+      ? categories.find(
+          (item) => item.toLowerCase() === rawCategory.toLowerCase(),
+        )
+      : null;
+    if (rawCategory && !category) {
+      throw csvError(`Unsupported category on CSV row ${index + 2}.`);
+    }
+
     const suggestion = suggestCategory(description);
     expenses.push({
       date: rawDate || null,
       description,
       amount,
+      direction,
+      currency: detectedCurrency || null,
+      imported_category: category,
       suggested_category: suggestion.category,
       suggestion_reason: suggestion.reason,
     });
   });
 
   if (!expenses.length) throw csvError('No valid expense rows found.');
+  if (currencies.size > 1) {
+    throw csvError('A quest can use one currency. Split mixed-currency CSVs.');
+  }
   return expenses;
 }
 
-module.exports = { parseExpenses, isValidDate, monthKeyFromDate };
+module.exports = { parseExpenses, isValidDate, monthKeyFromDate, parseAmount };

@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   LoaderCircle,
   Menu,
+  Printer,
   Receipt,
   Settings,
   ShieldCheck,
@@ -82,11 +83,26 @@ async function api(path, options = {}) {
   }
   return body;
 }
-const money = (value) =>
-  new Intl.NumberFormat(undefined, {
+const money = (value, currency) => {
+  const amount = Number(value) || 0;
+  if (currency && /^[A-Z]{3}$/.test(currency)) {
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency,
+      }).format(amount);
+    } catch {
+      return `${currency} ${new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(amount)}`;
+    }
+  }
+  return new Intl.NumberFormat(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(Number(value) || 0);
+  }).format(amount);
+};
 
 export default function App() {
   const [page, setPage] = useState('home');
@@ -95,6 +111,9 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [current, setCurrent] = useState(null);
   const [report, setReport] = useState(null);
+  const [budgetInfo, setBudgetInfo] = useState(null);
+  const [budgetInput, setBudgetInput] = useState('');
+  const [savingBudget, setSavingBudget] = useState(false);
   const [skipped, setSkipped] = useState([]);
   const [file, setFile] = useState(null);
   const [parsedCsv, setParsedCsv] = useState(null);
@@ -102,7 +121,15 @@ export default function App() {
     date: null,
     description: null,
     amount: null,
+    debit: null,
+    credit: null,
+    currency: null,
+    category: null,
+    direction: null,
   });
+  const [selectedCurrency, setSelectedCurrency] = useState('');
+  const [negativeAmountMeans, setNegativeAmountMeans] = useState('credit');
+  const [confirmedQuestImport, setConfirmedQuestImport] = useState(false);
   const [excludeInvalidRows, setExcludeInvalidRows] = useState(false);
   const [excludeDuplicateRows, setExcludeDuplicateRows] = useState(false);
   const [serverPreview, setServerPreview] = useState(null);
@@ -243,7 +270,19 @@ export default function App() {
     }
     setFile(nextFile);
     setParsedCsv(null);
-    setColumnMapping({ date: null, description: null, amount: null });
+    setColumnMapping({
+      date: null,
+      description: null,
+      amount: null,
+      debit: null,
+      credit: null,
+      currency: null,
+      category: null,
+      direction: null,
+    });
+    setSelectedCurrency('');
+    setNegativeAmountMeans('credit');
+    setConfirmedQuestImport(false);
     setExcludeInvalidRows(false);
     setExcludeDuplicateRows(false);
   }
@@ -255,6 +294,7 @@ export default function App() {
       const parsed = parseCsv(await file.text());
       setParsedCsv(parsed);
       setColumnMapping(inferColumnMapping(parsed.headers));
+      setConfirmedQuestImport(false);
       setPage('preview');
     } catch (e) {
       setError(e.message);
@@ -272,6 +312,8 @@ export default function App() {
       const built = buildCanonicalCsv(parsedCsv, columnMapping, {
         excludeInvalid: excludeInvalidRows,
         excludeDuplicates: excludeDuplicateRows,
+        currency: selectedCurrency,
+        negativeAmountMeans,
       });
       const form = new FormData();
       form.append(
@@ -290,7 +332,9 @@ export default function App() {
         sourceRows: built.rows,
         removedInvalid: built.removedInvalid,
         removedDuplicates: built.removedDuplicates,
+        totals: built.totals,
       });
+      setConfirmedQuestImport(false);
       notify(
         `${result.preview.length} rows checked. No quest has been created yet.`,
       );
@@ -301,7 +345,15 @@ export default function App() {
     }
   }
   async function createQuest() {
-    if (!file || !serverPreview || !canonicalCsv || busy) return;
+    if (
+      !file ||
+      !serverPreview ||
+      !canonicalCsv ||
+      busy ||
+      serverPreview.duplicateImport ||
+      !confirmedQuestImport
+    )
+      return;
     if (!/\.csv$/i.test(file.name)) {
       setError('Choose a .csv file to begin your quest.');
       return;
@@ -374,15 +426,8 @@ export default function App() {
       setPlayer({
         ...player,
         ...(result.player || {}),
-        questsCompleted: completedQuestCount,
-        achievements: [
-          ...new Set([
-            ...(player.achievements || []),
-            ...(result.player?.xp >= 10 ? ['First Review'] : []),
-            ...(completed ? ['Dragon Slayer'] : []),
-            ...(completedQuestCount >= 5 ? ['Five Quests Cleared'] : []),
-          ]),
-        ],
+        questsCompleted: result.player?.questsCompleted ?? completedQuestCount,
+        achievements: result.player?.achievements || [],
       });
       setCombatHit(true);
       window.setTimeout(() => setCombatHit(false), 720);
@@ -472,12 +517,8 @@ export default function App() {
       setPlayer({
         ...player,
         ...result.player,
-        questsCompleted: completedQuestCount,
-        achievements: [
-          ...(result.player.xp >= 10 ? ['First Review'] : []),
-          ...(completedQuestCount >= 1 ? ['Dragon Slayer'] : []),
-          ...(completedQuestCount >= 5 ? ['Five Quests Cleared'] : []),
-        ],
+        questsCompleted: result.player?.questsCompleted ?? completedQuestCount,
+        achievements: result.player?.achievements || [],
       });
       setQuest(result.quest);
       setCurrent(result.transaction);
@@ -497,11 +538,48 @@ export default function App() {
     try {
       const result = await api(`/quests/${quest.id}/report`);
       setReport(result.report);
+      if (quest.currency) {
+        try {
+          const budget = await api(`/budgets/${encodeURIComponent(quest.currency)}`);
+          setBudgetInfo(budget);
+          setBudgetInput(budget.budget?.monthlyAmount?.toString() || '');
+        } catch (budgetError) {
+          setBudgetInfo(null);
+          setError(`Report loaded, but the monthly budget could not be loaded: ${budgetError.message}`);
+        }
+      } else {
+        setBudgetInfo(null);
+        setBudgetInput('');
+      }
       setPage('report');
     } catch (e) {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  }
+  async function saveMonthlyBudget(amount = budgetInput) {
+    if (!quest?.currency || savingBudget) return;
+    const monthlyAmount = amount === '' ? 0 : Number(amount);
+    if (!Number.isFinite(monthlyAmount) || monthlyAmount < 0) {
+      setError('Enter a valid non-negative monthly budget.');
+      return;
+    }
+    setSavingBudget(true);
+    setError('');
+    try {
+      const result = await api(`/budgets/${encodeURIComponent(quest.currency)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ monthlyAmount }),
+      });
+      setBudgetInfo(result);
+      setBudgetInput(result.budget?.monthlyAmount?.toString() || '');
+      notify(result.budget ? 'Monthly budget saved.' : 'Monthly budget cleared.');
+    } catch (cause) {
+      setError(cause.message);
+    } finally {
+      setSavingBudget(false);
     }
   }
   async function resumeTransaction(transaction) {
@@ -561,6 +639,39 @@ export default function App() {
       setSavingCategoryId(null);
     }
   }
+  async function saveBulkCategoryCorrection(transactionIds, nextCategory) {
+    setError('');
+    const outcomes = [];
+    for (let index = 0; index < transactionIds.length; index += 5) {
+      const batch = transactionIds.slice(index, index + 5);
+      outcomes.push(
+        ...(await Promise.allSettled(
+          batch.map((id) =>
+            api(`/transactions/${id}/category`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ category: nextCategory }),
+            }),
+          ),
+        )),
+      );
+    }
+    const saved = outcomes.flatMap((outcome) =>
+      outcome.status === 'fulfilled' ? [outcome.value.transaction] : [],
+    );
+    const failed = outcomes.filter((outcome) => outcome.status === 'rejected');
+    if (saved.length) {
+      const savedById = new Map(saved.map((transaction) => [transaction.id, transaction]));
+      setTransactions((items) => items.map((item) => savedById.get(item.id) || item));
+      setCurrent((item) => item && savedById.get(item.id) ? savedById.get(item.id) : item);
+      notify(`${saved.length} transaction${saved.length === 1 ? '' : 's'} updated. XP and quest progress stayed the same.`);
+    }
+    if (failed.length) {
+      const reason = failed[0].reason;
+      setError(`${saved.length} of ${transactionIds.length} categories saved. ${reason?.message || 'Some updates failed; retry the remaining selection.'}`);
+    }
+    return saved.map((transaction) => transaction.id);
+  }
   function saveApi() {
     apiBase = apiInput.trim().replace(/\/+$/, '') || PRODUCTION_API_BASE;
     localStorage.setItem('expenseQuestApi', apiBase);
@@ -573,6 +684,7 @@ export default function App() {
   const nav = [
     ['home', 'Overview', LayoutDashboard],
     ['battle', 'Review expenses', Target],
+    ['transactions', 'Transactions', Receipt],
     ['report', 'Reports', BarChart3],
   ];
   const progress = quest?.progress || {
@@ -582,7 +694,13 @@ export default function App() {
     bossHealth: 100,
   };
   const questSpend = transactions.reduce(
-    (sum, item) => sum + (Number(item.amount) || 0),
+    (sum, item) =>
+      sum + (item.direction === 'credit' ? 0 : Number(item.amount) || 0),
+    0,
+  );
+  const questCredits = transactions.reduce(
+    (sum, item) =>
+      sum + (item.direction === 'credit' ? Number(item.amount) || 0 : 0),
     0,
   );
   const recentReviews = transactions
@@ -592,8 +710,15 @@ export default function App() {
     )
     .slice(0, 3);
   const csvAnalysis = parsedCsv
-    ? analyzeMappedCsv(parsedCsv, columnMapping)
+    ? analyzeMappedCsv(parsedCsv, columnMapping, {
+        currency: selectedCurrency,
+        negativeAmountMeans,
+      })
     : null;
+  useEffect(() => {
+    if (!selectedCurrency && csvAnalysis?.currency)
+      setSelectedCurrency(csvAnalysis.currency);
+  }, [selectedCurrency, csvAnalysis?.currency]);
   const csvMappingError =
     csvAnalysis?.errors.find((item) => typeof item === 'string') || '';
   const invalidCsvRows =
@@ -602,6 +727,32 @@ export default function App() {
     csvAnalysis?.rows.filter(
       (row) => !row.errors.length && !(excludeDuplicateRows && row.duplicateOf),
     ) || [];
+  const csvIncludedTotals = usableCsvRows.reduce(
+    (totals, row) => {
+      if (row.direction === 'credit') totals.credits += row.amount;
+      else totals.debits += row.amount;
+      return totals;
+    },
+    { debits: 0, credits: 0 },
+  );
+  const detectedColumns = parsedCsv
+    ? Object.entries(columnMapping)
+        .filter(([, index]) => index != null)
+        .map(([key, index]) => `${key}: ${parsedCsv.headers[index]}`)
+    : [];
+  const hasNegativeCsvAmounts = Boolean(
+    csvAnalysis?.rows.some((row) => /^\s*(?:-|\().+/.test(row.rawAmount)),
+  );
+
+  function updateColumnMapping(key, value) {
+    setColumnMapping((previous) => ({
+      ...previous,
+      [key]: value === '' ? null : Number(value),
+    }));
+    setServerPreview(null);
+    setCanonicalCsv('');
+    setConfirmedQuestImport(false);
+  }
 
   useEffect(() => {
     if (page !== 'battle' || !current || apiDialog) return undefined;
@@ -653,6 +804,11 @@ export default function App() {
     setParsedCsv(null);
     setServerPreview(null);
     setCanonicalCsv('');
+    setConfirmedQuestImport(false);
+    setSelectedCurrency('');
+    setNegativeAmountMeans('credit');
+    setExcludeInvalidRows(false);
+    setExcludeDuplicateRows(false);
     setReport(null);
     setUndoId(null);
     setPage('home');
@@ -693,8 +849,8 @@ export default function App() {
         <div className="top-actions">
           <button
             className="settings-button"
-            title="API connection"
-            aria-label="API connection settings"
+            title="Advanced settings"
+            aria-label="Advanced settings"
             onClick={() => setApiDialog(true)}
           >
             <Settings size={17} />
@@ -768,10 +924,12 @@ export default function App() {
                   <span>
                     <Wallet size={15} /> QUEST SPENDING
                   </span>
-                  <b>{quest ? money(questSpend) : '—'}</b>
+                  <b>{quest ? money(questSpend, quest.currency) : '—'}</b>
                   <small>
                     {quest
-                      ? 'From uploaded transactions'
+                      ? questCredits > 0
+                        ? `${money(questCredits, quest.currency)} in credits excluded`
+                        : 'From uploaded transactions'
                       : 'Upload a CSV to see your total'}
                   </small>
                 </div>
@@ -948,12 +1106,6 @@ export default function App() {
                       <ArrowRight size={16} />
                     </button>
                   </section>
-                  <div className="privacy-note">
-                    <ShieldCheck size={15} />
-                    <span>
-                      Your transactions are saved to your connected backend.
-                    </span>
-                  </div>
                 </aside>
               </div>
               <section className="dashboard-lower">
@@ -1008,11 +1160,12 @@ export default function App() {
                     <ShieldCheck size={17} />
                   </div>
                   <div>
-                    <span>YOUR DATA, YOUR ADVENTURE</span>
-                    <b>Real expenses. Real progress.</b>
+                    <span>YOUR DATA, CLEARLY EXPLAINED</span>
+                    <b>Only confirmed rows are saved.</b>
                     <p>
-                      Every number, category and reward comes from the
-                      transactions you upload and review.
+                      The original CSV stays in your browser. Confirmed
+                      transaction details and quest progress are sent to the
+                      Expense Quest backend and stored in its MongoDB database.
                     </p>
                   </div>
                 </div>
@@ -1080,16 +1233,23 @@ export default function App() {
                     We detected the closest matches. Change them if needed.
                   </span>
                 </div>
+                <p className="mapping-help">
+                  Match a description and either an amount column or debit and
+                  credit columns. Blank rows are ignored; rows with missing
+                  values stay visible for you to fix or exclude.
+                </p>
                 <div className="mapping-fields">
                   {[
-                    ['date', 'Date (optional)', true],
+                    ['date', 'Date', true],
                     ['description', 'Description / merchant', false],
-                    ['amount', 'Amount', false],
+                    ['amount', 'Amount', true],
+                    ['debit', 'Debit', true],
+                    ['credit', 'Credit', true],
                   ].map(([key, label, optional]) => (
                     <label key={key}>
                       <span>
                         {label}
-                        {optional && <small>Optional</small>}
+                        {optional && <small>{key === 'date' ? 'Optional' : 'Use if present'}</small>}
                       </span>
                       <select
                         aria-label={label}
@@ -1098,19 +1258,9 @@ export default function App() {
                             ? ''
                             : String(columnMapping[key])
                         }
-                        onChange={(event) => {
-                          setColumnMapping((previous) => ({
-                            ...previous,
-                            [key]:
-                              event.target.value === ''
-                                ? null
-                                : Number(event.target.value),
-                          }));
-                          setServerPreview(null);
-                          setCanonicalCsv('');
-                        }}
+                        onChange={(event) => updateColumnMapping(key, event.target.value)}
                       >
-                        {optional && <option value="">No date column</option>}
+                        {optional && <option value="">No {label.toLowerCase()} column</option>}
                         {!optional && <option value="">Choose a column</option>}
                         {parsedCsv.headers.map((header, index) => (
                           <option
@@ -1124,11 +1274,95 @@ export default function App() {
                     </label>
                   ))}
                 </div>
+                <details className="optional-mappings">
+                  <summary>Optional category, currency, and direction columns</summary>
+                  <div className="mapping-fields optional-mapping-fields">
+                    {[
+                      ['category', 'Category from file'],
+                      ['currency', 'Currency from file'],
+                      ['direction', 'Transaction direction'],
+                    ].map(([key, label]) => (
+                      <label key={key}>
+                        <span>{label}<small>Optional</small></span>
+                        <select
+                          aria-label={label}
+                          value={columnMapping[key] == null ? '' : String(columnMapping[key])}
+                          onChange={(event) => updateColumnMapping(key, event.target.value)}
+                        >
+                          <option value="">No {label.toLowerCase()} column</option>
+                          {parsedCsv.headers.map((header, index) => (
+                            <option key={`${header}-${index}`} value={String(index)}>
+                              {header || `Column ${index + 1}`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </details>
+                <div className="csv-import-options">
+                  <label className="currency-choice">
+                    <span>Currency for this statement</span>
+                    <input
+                      aria-label="Currency code"
+                      list="expense-quest-currency-codes"
+                      maxLength={3}
+                      value={selectedCurrency || csvAnalysis.currency || ''}
+                      placeholder="Choose a code, e.g. USD or INR"
+                      onChange={(event) => {
+                        setSelectedCurrency(event.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3));
+                        setServerPreview(null);
+                        setCanonicalCsv('');
+                        setConfirmedQuestImport(false);
+                      }}
+                    />
+                    <datalist id="expense-quest-currency-codes">
+                      {['USD', 'INR', 'EUR', 'GBP', 'CAD', 'AUD', 'NZD', 'JPY', 'SGD', 'CHF', 'AED', 'ZAR'].map((code) => (
+                        <option key={code} value={code} />
+                      ))}
+                    </datalist>
+                    <small>Currency symbols like $ and ¥ are shared, so check the code used by your statement.</small>
+                  </label>
+                  {hasNegativeCsvAmounts && (
+                    <label className="negative-amount-choice">
+                      <span>How should negative amounts be treated?</span>
+                      <select
+                        aria-label="How to interpret negative amounts"
+                        value={negativeAmountMeans}
+                        onChange={(event) => {
+                          setNegativeAmountMeans(event.target.value);
+                          setServerPreview(null);
+                          setCanonicalCsv('');
+                          setConfirmedQuestImport(false);
+                        }}
+                      >
+                        <option value="credit">As a credit or refund</option>
+                        <option value="debit">As an expense</option>
+                      </select>
+                    </label>
+                  )}
+                </div>
+                <div className="detected-columns" aria-label="Detected columns">
+                  <b>Detected:</b>{' '}
+                  {detectedColumns.length
+                    ? detectedColumns.map((item) => <span key={item}>{item}</span>)
+                    : 'No columns matched yet'}
+                  {parsedCsv.emptyRowsSkipped > 0 && (
+                    <small>{parsedCsv.emptyRowsSkipped} completely blank row{parsedCsv.emptyRowsSkipped === 1 ? '' : 's'} ignored.</small>
+                  )}
+                </div>
                 {csvMappingError && (
                   <p className="preview-inline-error" role="alert">
                     {csvMappingError}
                   </p>
                 )}
+              </section>
+
+              <section className="preview-summary" aria-label="Import summary">
+                <div><span>ROWS READY</span><b>{usableCsvRows.length}</b></div>
+                <div><span>DEBITS</span><b>{money(csvIncludedTotals.debits, csvAnalysis.currency || selectedCurrency || undefined)}</b></div>
+                <div><span>CREDITS</span><b>{money(csvIncludedTotals.credits, csvAnalysis.currency || selectedCurrency || undefined)}</b></div>
+                <div><span>DATE RANGE</span><b>{csvAnalysis.dateRange ? `${csvAnalysis.dateRange.from} – ${csvAnalysis.dateRange.to}` : 'Dates not provided'}</b></div>
               </section>
 
               <section
@@ -1179,6 +1413,7 @@ export default function App() {
                           <th scope="col">Date</th>
                           <th scope="col">Description</th>
                           <th scope="col">Amount</th>
+                          <th scope="col">Category</th>
                           <th scope="col">Check</th>
                         </tr>
                       </thead>
@@ -1200,6 +1435,9 @@ export default function App() {
                               {row.description || '—'}
                             </td>
                             <td data-label="Amount">{row.rawAmount || '—'}</td>
+                            <td data-label="Category">
+                              {row.category || 'Suggested after server check'}
+                            </td>
                             <td data-label="Check">
                               {row.errors.length
                                 ? row.errors.join(' ')
@@ -1222,6 +1460,7 @@ export default function App() {
                         setExcludeInvalidRows(event.target.checked);
                         setServerPreview(null);
                         setCanonicalCsv('');
+                        setConfirmedQuestImport(false);
                       }}
                     />{' '}
                     Exclude {invalidCsvRows.length} invalid row
@@ -1237,6 +1476,7 @@ export default function App() {
                         setExcludeDuplicateRows(event.target.checked);
                         setServerPreview(null);
                         setCanonicalCsv('');
+                        setConfirmedQuestImport(false);
                       }}
                     />{' '}
                     Exclude {csvAnalysis.duplicates.length} likely duplicate row
@@ -1259,6 +1499,24 @@ export default function App() {
                       {serverPreview.preview.length} rows will be included
                     </span>
                   </div>
+                  <div className="preview-confirm-summary">
+                    <span>{serverPreview.totals.totalTransactions} rows</span>
+                    <span>Debits {money(serverPreview.totals.totalDebits, serverPreview.totals.currency || quest?.currency || undefined)}</span>
+                    <span>Credits {money(serverPreview.totals.totalCredits, serverPreview.totals.currency || quest?.currency || undefined)}</span>
+                    <span>{serverPreview.totals.dateRange ? `${serverPreview.totals.dateRange.from} – ${serverPreview.totals.dateRange.to}` : 'Dates not provided'}</span>
+                  </div>
+                  {serverPreview.duplicateImport && (
+                    <div className="preview-warning duplicate-warning" role="alert">
+                      <CircleHelp size={17} />
+                      <span>
+                        <b>This statement was already imported.</b>{' '}
+                        {serverPreview.duplicateQuestId
+                          ? `It matches quest ${serverPreview.duplicateQuestId}.`
+                          : 'The same transactions are already saved.'}{' '}
+                        Duplicate imports are blocked to prevent duplicate transactions and rewards.
+                      </span>
+                    </div>
+                  )}
                   {serverPreview.removedInvalid > 0 && (
                     <p className="preview-removal-note">
                       {serverPreview.removedInvalid} invalid row
@@ -1280,11 +1538,11 @@ export default function App() {
                           <b>{item.description}</b>
                           <small>
                             {item.date || 'Date not provided'} ·{' '}
-                            {money(item.amount)}
+                            {item.direction === 'credit' ? 'Credit · ' : ''}{money(item.amount, item.currency || serverPreview.totals.currency || undefined)}
                           </small>
                         </span>
                         <span className="suggestion-pill">
-                          {item.suggestedCategory}
+                          {item.category || item.suggestedCategory}
                           <small>{item.suggestionReason}</small>
                         </span>
                       </div>
@@ -1295,6 +1553,15 @@ export default function App() {
                       </p>
                     )}
                   </div>
+                  <label className="preview-optout quest-confirmation">
+                    <input
+                      type="checkbox"
+                      checked={confirmedQuestImport}
+                      onChange={(event) => setConfirmedQuestImport(event.target.checked)}
+                      disabled={serverPreview.duplicateImport}
+                    />{' '}
+                    I reviewed the totals and categories. Create this quest with {serverPreview.preview.length} transactions.
+                  </label>
                   <div className="preview-actions">
                     <button
                       type="button"
@@ -1308,7 +1575,7 @@ export default function App() {
                       type="button"
                       className="button-primary"
                       onClick={createQuest}
-                      disabled={busy || !serverPreview.preview.length}
+                      disabled={busy || !serverPreview.preview.length || !confirmedQuestImport || serverPreview.duplicateImport}
                     >
                       {busy ? (
                         <LoaderCircle className="spin" size={15} />
@@ -1317,7 +1584,9 @@ export default function App() {
                       )}
                       {busy
                         ? 'Creating quest…'
-                        : `Create quest · ${serverPreview.preview.length} expenses`}
+                        : serverPreview.duplicateImport
+                          ? 'Already imported'
+                          : `Create quest · ${serverPreview.preview.length} transactions`}
                     </button>
                   </div>
                 </section>
@@ -1339,7 +1608,8 @@ export default function App() {
                       busy ||
                       Boolean(csvMappingError) ||
                       usableCsvRows.length === 0 ||
-                      (invalidCsvRows.length > 0 && !excludeInvalidRows)
+                      (invalidCsvRows.length > 0 && !excludeInvalidRows) ||
+                      !/^[A-Z]{3}$/.test(selectedCurrency || csvAnalysis.currency || '')
                     }
                   >
                     {busy ? (
@@ -1349,7 +1619,7 @@ export default function App() {
                     )}
                     {busy
                       ? 'Checking categories…'
-                      : 'Check categories with server'}
+                      : 'Check categories and duplicate import'}
                   </button>
                 </div>
               )}
@@ -1471,7 +1741,10 @@ export default function App() {
                         <Receipt size={24} />
                       </div>
                       <div className="merchant-name">{current.description}</div>
-                      <div className="amount">{money(current.amount)}</div>
+                      <div className="amount">
+                        {current.direction === 'credit' ? '+ ' : ''}
+                        {money(current.amount, current.currency || quest.currency)}
+                      </div>
                       <div className="receipt-separator" />
                       <div className="receipt-detail">
                         <span>DATE</span>
@@ -1610,11 +1883,7 @@ export default function App() {
                     ) : (
                       <button
                         className="button-primary"
-                        onClick={() => {
-                          document
-                            .getElementById('transaction-manager')
-                            ?.scrollIntoView({ behavior: 'smooth' });
-                        }}
+                        onClick={() => setPage('transactions')}
                       >
                         Find skipped transactions <ArrowRight size={15} />
                       </button>
@@ -1627,18 +1896,40 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {quest && (
-                <TransactionManager
-                  transactions={transactions}
-                  onSaveCategory={saveCategoryCorrection}
-                  onReview={focusTransaction}
-                  savingCategoryId={savingCategoryId}
-                />
-              )}
             </>
           )}
+          {page === 'transactions' && (
+            quest ? (
+              <TransactionManager
+                transactions={transactions}
+                currency={quest.currency}
+                onSaveCategory={saveCategoryCorrection}
+                onBulkSaveCategory={saveBulkCategoryCorrection}
+                onReview={focusTransaction}
+                savingCategoryId={savingCategoryId}
+              />
+            ) : (
+              <div className="empty-quest">
+                <Receipt />
+                <h2>No transactions yet</h2>
+                <p>Upload a CSV to create a quest and manage its transactions here.</p>
+                <button className="button-primary" type="button" onClick={() => setPage('home')}>
+                  Upload expenses <ArrowRight size={15} />
+                </button>
+              </div>
+            )
+          )}
           {page === 'report' && (
-            <Report quest={quest} report={report} showReport={showReport} />
+            <Report
+              quest={quest}
+              report={report}
+              showReport={showReport}
+              budgetInfo={budgetInfo}
+              budgetInput={budgetInput}
+              setBudgetInput={setBudgetInput}
+              onSaveBudget={saveMonthlyBudget}
+              savingBudget={savingBudget}
+            />
           )}
           {page === 'victory' && (
             <div className="victory-screen">
@@ -1716,11 +2007,13 @@ export default function App() {
             >
               <X size={17} />
             </button>
-            <span className="step-tag">CONNECTION SETTINGS</span>
-            <h2 id="api-dialog-title">Connect your quest API</h2>
+            <span className="step-tag">ADVANCED SETTINGS</span>
+            <h2 id="api-dialog-title">Backend connection</h2>
             <p>
-              Enter the public URL of your Expense Quest backend. Leave blank to
-              restore the production backend.
+              Most people can leave this unchanged. Set a public Expense Quest
+              backend URL only when you have been given a different server. This
+              setting is stored in this browser. Leave blank to restore the
+              production connection.
             </p>
             <label>
               BACKEND BASE URL
@@ -1746,7 +2039,16 @@ export default function App() {
   );
 }
 
-function Report({ quest, report, showReport }) {
+function Report({
+  quest,
+  report,
+  showReport,
+  budgetInfo,
+  budgetInput,
+  setBudgetInput,
+  onSaveBudget,
+  savingBudget,
+}) {
   if (!quest)
     return (
       <div className="empty-quest">
@@ -1805,22 +2107,101 @@ function Report({ quest, report, showReport }) {
           </h1>
           <p>Every number is calculated from your uploaded expenses.</p>
         </div>
-        <a
-          className="button-primary"
-          href={`${apiBase}/api/quests/${quest.id}/export`}
-        >
-          <ArrowDownToLine size={15} /> Download categorized CSV
-        </a>
+        <div className="report-actions">
+          <a
+            className="button-primary"
+            href={`${apiBase}/api/quests/${quest.id}/export`}
+          >
+            <ArrowDownToLine size={15} /> Download categorized CSV
+          </a>
+          <button className="button-secondary" type="button" onClick={() => window.print()}>
+            <Printer size={15} /> Print / Save as PDF
+          </button>
+        </div>
       </div>
+      <section className="report-card budget-panel" aria-labelledby="budget-title">
+        <div className="report-card-title">
+          <Wallet />
+          <div>
+            <h2 id="budget-title">Monthly budget</h2>
+            <p>Compare your budget with real debit transactions for {budgetInfo?.month || 'this month'}.</p>
+          </div>
+        </div>
+        {quest.currency ? (
+          <>
+            <form
+              className="budget-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onSaveBudget();
+              }}
+            >
+              <label>
+                <span>Budget amount ({quest.currency})</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1000000000"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={budgetInput}
+                  onChange={(event) => setBudgetInput(event.target.value)}
+                  placeholder="Set a monthly limit"
+                  aria-label={`Monthly budget in ${quest.currency}`}
+                />
+              </label>
+              <button className="button-primary" type="submit" disabled={savingBudget || !budgetInput}>
+                {savingBudget ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}
+                {savingBudget ? 'Saving…' : 'Save budget'}
+              </button>
+              {budgetInfo?.budget && (
+                <button className="button-secondary" type="button" onClick={() => onSaveBudget('')} disabled={savingBudget}>
+                  Clear budget
+                </button>
+              )}
+            </form>
+            {budgetInfo?.budget ? (
+              <>
+                <div className="budget-summary">
+                  <div><span>MONTHLY BUDGET</span><b>{money(budgetInfo.budget.monthlyAmount, quest.currency)}</b></div>
+                  <div><span>SPENT THIS MONTH</span><b>{money(budgetInfo.currentMonthSpending, quest.currency)}</b></div>
+                  <div><span>REMAINING</span><b>{money(budgetInfo.remaining, quest.currency)}</b></div>
+                  <div><span>USED</span><b>{budgetInfo.percentUsed}%</b></div>
+                </div>
+                <div
+                  className={`budget-meter ${budgetInfo.overBudget ? 'over' : budgetInfo.nearLimit ? 'near' : ''}`}
+                  role="img"
+                  aria-label={`${budgetInfo.percentUsed}% of monthly budget used`}
+                >
+                  <i style={{ width: `${Math.min(budgetInfo.percentUsed, 100)}%` }} />
+                </div>
+                {(budgetInfo.nearLimit || budgetInfo.overBudget) && (
+                  <p className={`budget-warning ${budgetInfo.overBudget ? 'over' : ''}`} role="status">
+                    {budgetInfo.overBudget
+                      ? `You are ${money(Math.abs(budgetInfo.remaining), quest.currency)} over this month's budget.`
+                      : `You have used ${budgetInfo.percentUsed}% of this month's budget.`}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="budget-empty">Set a monthly limit to see spending, remaining balance, and an 80% heads-up. Totals include debit transactions saved in {quest.currency} across your quests.</p>
+            )}
+          </>
+        ) : (
+          <p className="budget-empty">This older quest has no saved currency code. Upload a statement with a currency selected to use budget tracking.</p>
+        )}
+      </section>
       <div className="report-kpis">
         <div>
           <span>TOTAL SPENDING</span>
-          <b>{money(report.totalExpenses)}</b>
-          <small>{report.totalTransactions} transactions</small>
+          <b>{money(report.totalExpenses, report.currency || quest.currency)}</b>
+          <small>
+            {report.totalTransactions} transactions · {money(report.totalCredits, report.currency || quest.currency)} credits · Net {money(report.netSpend, report.currency || quest.currency)}
+          </small>
         </div>
         <div>
           <span>AVERAGE TRANSACTION</span>
-          <b>{money(report.averageTransactionAmount)}</b>
+          <b>{money(report.averageTransactionAmount, report.currency || quest.currency)}</b>
           <small>Across this quest</small>
         </div>
         <div>
@@ -1833,7 +2214,7 @@ function Report({ quest, report, showReport }) {
           <b>{report.topMerchants?.[0]?.merchant || '—'}</b>
           <small>
             {report.topMerchants?.[0]
-              ? `${money(report.topMerchants[0].spending)} across ${report.topMerchants[0].count} transactions`
+              ? `${money(report.topMerchants[0].spending, report.currency || quest.currency)} across ${report.topMerchants[0].count} transactions`
               : 'No merchant totals yet'}
           </small>
         </div>
@@ -1854,7 +2235,7 @@ function Report({ quest, report, showReport }) {
                   <i className={`legend-dot dot-${index % 6}`} />
                   {item.category}
                 </span>
-                <b>{money(item.spending)}</b>
+                <b>{money(item.spending, report.currency || quest.currency)}</b>
               </div>
               <div className="thin-meter">
                 <i
@@ -1886,14 +2267,14 @@ function Report({ quest, report, showReport }) {
               <div
                 className="spending-donut"
                 role="img"
-                aria-label={`Category distribution of ${money(report.totalExpenses)} total spending`}
+                aria-label={`Category distribution of ${money(report.totalExpenses, report.currency || quest.currency)} total spending`}
                 style={{
                   background: `conic-gradient(${donutSegments.join(', ')})`,
                 }}
               >
                 <span>
                   <small>TOTAL</small>
-                  <b>{money(report.totalExpenses)}</b>
+                  <b>{money(report.totalExpenses, report.currency || quest.currency)}</b>
                 </span>
               </div>
               <div className="donut-legend">
@@ -1972,7 +2353,7 @@ function Report({ quest, report, showReport }) {
                     }}
                   />
                 </div>
-                <b>{money(item.spending)}</b>
+                <b>{money(item.spending, report.currency || quest.currency)}</b>
               </div>
             ))
           ) : (
@@ -2007,7 +2388,7 @@ function Report({ quest, report, showReport }) {
                       % of total
                     </small>
                   </span>
-                  <strong>{money(item.spending)}</strong>
+                  <strong>{money(item.spending, report.currency || quest.currency)}</strong>
                 </li>
               ))}
             </ol>
@@ -2038,7 +2419,7 @@ function Report({ quest, report, showReport }) {
                       {item.category || 'Uncategorized'}
                     </small>
                   </span>
-                  <strong>{money(item.amount)}</strong>
+                  <strong>{money(item.amount, item.currency || report.currency || quest.currency)}</strong>
                 </li>
               ))}
             </ol>

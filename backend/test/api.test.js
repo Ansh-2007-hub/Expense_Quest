@@ -75,13 +75,42 @@ describe(
       assert.equal(data.preview[0].id, undefined);
     });
 
+    test('monthly budgets persist by currency and accept clearing with zero', async () => {
+      let response = await json('/api/budgets/USD');
+      assert.equal(response.status, 200);
+      assert.equal(response.data.budget, null);
+
+      response = await json('/api/budgets/USD', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ monthlyAmount: 1200 }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.data.budget.monthlyAmount, 1200);
+
+      response = await json('/api/budgets/USD', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ monthlyAmount: 0 }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.data.budget, null);
+
+      response = await json('/api/budgets/USD', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ monthlyAmount: -1 }),
+      });
+      assert.equal(response.status, 400);
+    });
+
     test('upload validates and categorizes actual CSV rows', async () => {
       const form = new FormData();
       form.append(
         'file',
         new Blob(
           [
-            'Date,Merchant,Amount\n2026-02-01,Swiggy dinner,420.50\n2026-02-02,Metro card,300\n',
+            'Date,Merchant,Amount\n2026-02-01,Swiggy dinner,420.50\n2026-02-02,Metro card,300\n2026-02-03,Refund,-25\n',
           ],
           { type: 'text/csv' },
         ),
@@ -94,13 +123,39 @@ describe(
       });
       const data = await response.json();
       assert.equal(response.status, 201);
-      assert.equal(data.quest.totalTransactions, 2);
+      assert.equal(data.quest.totalTransactions, 3);
       assert.equal(data.preview[0].suggestedCategory, 'Food');
       assert.match(data.preview[0].suggestionReason, /Swiggy/);
       assert.equal(data.preview[1].suggestedCategory, 'Travel');
       questId = data.quest.id;
       transactionId = data.preview[0].id;
       skippedTransactionId = data.preview[1].id;
+    });
+
+    test('preview warns on exact duplicate imports and upload rejects them', async () => {
+      const csv =
+        'Date,Merchant,Amount\n2026-02-01,Swiggy dinner,420.50\n2026-02-02,Metro card,300\n2026-02-03,Refund,-25\n';
+      const previewForm = new FormData();
+      previewForm.append('file', new Blob([csv], { type: 'text/csv' }), 'same.csv');
+      let response = await fetch(base + '/api/quests/preview', {
+        method: 'POST',
+        body: previewForm,
+      });
+      let data = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(data.duplicateImport, true);
+      assert.equal(data.duplicateQuestId, questId);
+      assert.equal(data.preview[2].direction, 'credit');
+
+      const uploadForm = new FormData();
+      uploadForm.append('file', new Blob([csv], { type: 'text/csv' }), 'same.csv');
+      response = await fetch(base + '/api/quests/upload', {
+        method: 'POST',
+        body: uploadForm,
+      });
+      data = await response.json();
+      assert.equal(response.status, 409);
+      assert.match(data.error, /already imported/);
     });
 
     test('skip state persists and can be resumed without XP', async () => {
@@ -149,7 +204,8 @@ describe(
       });
       assert.equal(response.status, 200);
       assert.equal(response.data.player.xp, 10);
-      assert.equal(response.data.quest.bossHealth, 50);
+      assert.deepEqual(response.data.player.achievements, ['First Review']);
+      assert.equal(response.data.quest.bossHealth, 67);
 
       response = await json(`/api/transactions/${transactionId}`, {
         method: 'PATCH',
@@ -173,6 +229,9 @@ describe(
 
       const report = await json(`/api/quests/${questId}/report`);
       assert.equal(report.data.report.totalExpenses, 720.5);
+      assert.equal(report.data.report.totalDebits, 720.5);
+      assert.equal(report.data.report.totalCredits, 25);
+      assert.equal(report.data.report.netSpend, 695.5);
       assert.equal(report.data.report.highestSpendingCategory, 'Shopping');
       assert.equal(
         report.data.report.topMerchants[0].merchant,
@@ -191,6 +250,7 @@ describe(
       });
       assert.equal(response.status, 200);
       assert.equal(response.data.player.xp, 0);
+      assert.deepEqual(response.data.player.achievements, []);
       assert.equal(response.data.quest.progress.reviewed, 0);
     });
   },

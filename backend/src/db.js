@@ -35,7 +35,13 @@ async function connect() {
       database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, _id: 1 }),
       database.collection('transactions').createIndex({ quest_id: 1, final_category: 1 }),
       database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, reviewed_at: -1, _id: -1 }),
+      database.collection('transactions').createIndex({ reviewed: 1 }),
+      database.collection('transactions').createIndex({ currency: 1, date: 1 }),
       database.collection('quests').createIndex({ status: 1, created_at: -1 }),
+      database.collection('quests').createIndex(
+        { content_hash: 1 },
+        { unique: true, sparse: true, name: 'quest_content_hash_unique' },
+      ),
     ]);
 
     await database.collection('players').updateOne(
@@ -101,9 +107,10 @@ const db = {
   withTransaction,
   reserveIds,
   dropDatabase,
+  isConnected: () => Boolean(database),
 };
 
-for (const name of ['counters', 'players', 'quests', 'transactions']) {
+for (const name of ['budgets', 'counters', 'players', 'quests', 'transactions']) {
   Object.defineProperty(db, name, { enumerable: true, get: () => getCollection(name) });
 }
 
