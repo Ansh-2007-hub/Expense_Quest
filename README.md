@@ -87,6 +87,7 @@ Vite serves the frontend at `http://localhost:5173` and proxies `/api` requests 
 | `MONGODB_DATABASE` | `expense_quest` | Database name used by the API. |
 | `FRONTEND_ORIGIN` | Local Vite origins and the live app origin | Comma-separated list of exact browser origins allowed by CORS. In production, use `https://expense-quest-qxabon.v2.appdeploy.ai`. |
 | `MAX_UPLOAD_MB` | `5` | Maximum CSV upload size in megabytes. |
+| `MAX_CSV_ROWS` | `5000` | Maximum transactions accepted in a single quest (hard-capped at 10,000). |
 | `VITE_API_URL` | API default in the frontend | Optional public API base URL. Defaults to the production API in a production build; it must never contain credentials. |
 
 See [`.env.example`](./.env.example) for the complete local template. `.env` files are ignored by Git.
@@ -98,7 +99,7 @@ npm run build
 npm test
 ```
 
-The production frontend is written to `dist/`. Tests use Node's built-in test runner. MongoDB API integration tests require `MONGODB_URI`; they create and remove a uniquely named test database, so use a development/test cluster with permission to create and drop databases. Without `MONGODB_URI`, those integration tests are skipped.
+The production frontend is written to `dist/`. `npm test` runs the Node unit/API suite and Vitest interaction tests. The MongoDB API integration suite requires an explicit `TEST_MONGODB_URI` pointing to a dedicated replica-set database named `expense_quest_test_*`; it drops that test database afterward. The GitHub Actions workflow creates an isolated replica set so the integration suite runs in CI. Do not use production credentials or data for tests.
 
 ## Architecture
 
@@ -139,7 +140,11 @@ The API base URL is `http://localhost:4000` locally and `https://expense-quest-a
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | Checks API and MongoDB availability. |
-| `POST` | `/api/quests/preview` | Validates and categorizes a CSV without saving a quest. |
+| `POST` | `/api/auth/register` | Creates an account and returns a short-lived bearer session. |
+| `POST` | `/api/auth/login` | Starts a bearer session for an existing account. |
+| `GET` | `/api/auth/me` | Validates the current bearer session. |
+| `POST` | `/api/auth/logout` | Revokes the current bearer session. |
+| `POST` | `/api/quests/preview` | Validates and categorizes a CSV without saving a quest. Requires account authorization. |
 | `POST` | `/api/quests/upload` | Creates a quest and stores its transactions. |
 | `GET` | `/api/quests/:id/report` | Returns spending summaries and insights. |
 | `GET` | `/api/quests/:id/export` | Downloads categorized transaction data as CSV. |
@@ -174,9 +179,9 @@ Build the frontend with `npm run build` and publish the updated frontend through
 
 ## Privacy and security
 
-**The current public app is a single-player prototype without user authentication or per-user data isolation. Do not upload real, sensitive, or identifying financial records to the public deployment. Use the provided sample file or synthetic data.** Adding authenticated users and isolating each user's quests and transactions is required before using this as a private finance service.
+Accounts now use salted scrypt password hashes and opaque, revocable bearer sessions. Quest, transaction, player, report, export, and budget operations are scoped to the authenticated account. The sample CSV contains synthetic merchant names and amounts; use it for the public walkthrough. Legacy records created before account isolation have no owner and are intentionally not exposed to newly created accounts. The app does not provide email verification, password reset, or financial-advice services; avoid uploading files you are not authorized to process.
 
-For local development, keep `.env` and database credentials out of commits. Use a dedicated test database because the integration suite drops its generated test database when it finishes.
+For local development, keep `.env` and database credentials out of commits. Integration tests only accept `TEST_MONGODB_URI` whose database name begins `expense_quest_test_`; the suite drops that database when finished. Never set it to a production URI. GitHub Actions starts an isolated MongoDB replica set for the full integration run.
 
 ## Contributing
 

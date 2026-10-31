@@ -7,9 +7,15 @@ require('dotenv').config({
   path: require('node:path').resolve(__dirname, '../../.env'),
 });
 
-const hasMongoUri = Boolean(process.env.MONGODB_URI);
-if (hasMongoUri) {
-  process.env.MONGODB_DATABASE = `expense_quest_test_${randomUUID().replaceAll('-', '')}`;
+const testMongoUri = process.env.TEST_MONGODB_URI;
+const hasMongoUri = Boolean(testMongoUri);
+if (testMongoUri) {
+  const uriDatabase = decodeURIComponent(new URL(testMongoUri).pathname.replace(/^\//, ''));
+  if (!/^expense_quest_test_[a-z0-9_]+$/i.test(uriDatabase)) {
+    throw new Error('TEST_MONGODB_URI must name a dedicated expense_quest_test_* database.');
+  }
+  process.env.MONGODB_URI = testMongoUri;
+  process.env.MONGODB_DATABASE = uriDatabase;
 }
 
 const { app, db } = require('../src/server');
@@ -19,7 +25,7 @@ describe(
   {
     skip: hasMongoUri
       ? false
-      : 'Set MONGODB_URI to run the MongoDB integration tests.',
+      : 'Set TEST_MONGODB_URI to a dedicated expense_quest_test_* database to run MongoDB integration tests.',
   },
   () => {
     let server;
@@ -27,6 +33,8 @@ describe(
     let questId;
     let transactionId;
     let skippedTransactionId;
+    let authToken;
+    let secondUserToken;
 
     before(async () => {
       await db.connect();
@@ -43,8 +51,10 @@ describe(
       }
     });
 
-    async function json(url, options) {
-      const response = await fetch(base + url, options);
+    async function json(url, options = {}, { auth = true, token = authToken } = {}) {
+      const headers = new Headers(options.headers || {});
+      if (auth && token) headers.set('Authorization', `Bearer ${token}`);
+      const response = await fetch(base + url, { ...options, headers });
       return { status: response.status, data: await response.json() };
     }
 
@@ -52,6 +62,33 @@ describe(
       const response = await json('/api/health');
       assert.equal(response.status, 200);
       assert.equal(response.data.status, 'ok');
+    });
+
+    test('private routes require an account; signup and sessions work', async () => {
+      let response = await json('/api/player', {}, { auth: false });
+      assert.equal(response.status, 401);
+
+      response = await json('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: '  player@example.test ', password: 'adventurer-secret-123' }),
+      }, { auth: false });
+      assert.equal(response.status, 201);
+      assert.equal(response.data.user.email, 'player@example.test');
+      assert.ok(response.data.token);
+      authToken = response.data.token;
+
+      const identity = await json('/api/auth/me');
+      assert.equal(identity.status, 200);
+      assert.equal(identity.data.user.id, response.data.user.id);
+
+      const other = await json('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'other@example.test', password: 'another-secret-123' }),
+      }, { auth: false });
+      assert.equal(other.status, 201);
+      secondUserToken = other.data.token;
     });
 
     test('preview validates and categorizes without creating a quest', async () => {
@@ -65,6 +102,7 @@ describe(
       );
       const response = await fetch(base + '/api/quests/preview', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
         body: form,
       });
       const data = await response.json();
@@ -119,6 +157,7 @@ describe(
 
       const response = await fetch(base + '/api/quests/upload', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
         body: form,
       });
       const data = await response.json();
@@ -130,6 +169,11 @@ describe(
       questId = data.quest.id;
       transactionId = data.preview[0].id;
       skippedTransactionId = data.preview[1].id;
+
+      const isolated = await json(`/api/quests/${questId}`, {}, { token: secondUserToken });
+      assert.equal(isolated.status, 404);
+      const isolatedPlayer = await json('/api/player', {}, { token: secondUserToken });
+      assert.equal(isolatedPlayer.data.player.xp, 0);
     });
 
     test('preview warns on exact duplicate imports and upload rejects them', async () => {
@@ -139,6 +183,7 @@ describe(
       previewForm.append('file', new Blob([csv], { type: 'text/csv' }), 'same.csv');
       let response = await fetch(base + '/api/quests/preview', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
         body: previewForm,
       });
       let data = await response.json();
@@ -151,6 +196,7 @@ describe(
       uploadForm.append('file', new Blob([csv], { type: 'text/csv' }), 'same.csv');
       response = await fetch(base + '/api/quests/upload', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
         body: uploadForm,
       });
       data = await response.json();
@@ -191,6 +237,7 @@ describe(
       );
       const response = await fetch(base + '/api/quests/upload', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
         body: form,
       });
       assert.equal(response.status, 400);
@@ -239,7 +286,9 @@ describe(
       );
       assert.equal(report.data.report.topTransactions.length, 2);
 
-      const exported = await fetch(base + `/api/quests/${questId}/export`);
+      const exported = await fetch(base + `/api/quests/${questId}/export`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
       assert.equal(exported.status, 200);
       assert.match(await exported.text(), /Final Category/);
     });

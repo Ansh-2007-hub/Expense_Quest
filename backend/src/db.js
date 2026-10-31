@@ -30,25 +30,24 @@ async function connect() {
     database = client.db(process.env.MONGODB_DATABASE || 'expense_quest');
     await client.db('admin').command({ ping: 1 });
 
-    await Promise.all([
-      database.collection('transactions').createIndex({ quest_id: 1, _id: 1 }),
-      database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, _id: 1 }),
-      database.collection('transactions').createIndex({ quest_id: 1, final_category: 1 }),
-      database.collection('transactions').createIndex({ quest_id: 1, reviewed: 1, reviewed_at: -1, _id: -1 }),
-      database.collection('transactions').createIndex({ reviewed: 1 }),
-      database.collection('transactions').createIndex({ currency: 1, date: 1 }),
-      database.collection('quests').createIndex({ status: 1, created_at: -1 }),
-      database.collection('quests').createIndex(
-        { content_hash: 1 },
-        { unique: true, sparse: true, name: 'quest_content_hash_unique' },
-      ),
-    ]);
+    const quests = database.collection('quests');
+    const oldIndexes = await quests.indexes();
+    if (oldIndexes.some((index) => index.name === 'quest_content_hash_unique')) {
+      await quests.dropIndex('quest_content_hash_unique');
+    }
 
-    await database.collection('players').updateOne(
-      { _id: 'player' },
-      { $setOnInsert: { xp: 0, quests_completed: 0 } },
-      { upsert: true },
-    );
+    await Promise.all([
+      database.collection('users').createIndex({ email: 1 }, { unique: true, name: 'user_email_unique' }),
+      database.collection('sessions').createIndex({ token_hash: 1 }, { unique: true, name: 'session_token_unique' }),
+      database.collection('sessions').createIndex({ expires_at: 1 }, { expireAfterSeconds: 0, name: 'session_expiry_ttl' }),
+      database.collection('transactions').createIndex({ user_id: 1, quest_id: 1, _id: 1 }),
+      database.collection('transactions').createIndex({ user_id: 1, quest_id: 1, reviewed: 1, _id: 1 }),
+      database.collection('transactions').createIndex({ user_id: 1, quest_id: 1, final_category: 1 }),
+      database.collection('transactions').createIndex({ user_id: 1, quest_id: 1, reviewed: 1, reviewed_at: -1, _id: -1 }),
+      database.collection('transactions').createIndex({ user_id: 1, currency: 1, date: 1 }),
+      quests.createIndex({ user_id: 1, status: 1, created_at: -1 }),
+      quests.createIndex({ user_id: 1, content_hash: 1 }, { unique: true, sparse: true, name: 'user_quest_content_hash_unique' }),
+    ]);
 
     return database;
   } catch (error) {
@@ -110,7 +109,7 @@ const db = {
   isConnected: () => Boolean(database),
 };
 
-for (const name of ['budgets', 'counters', 'players', 'quests', 'transactions']) {
+for (const name of ['budgets', 'counters', 'players', 'quests', 'sessions', 'transactions', 'users']) {
   Object.defineProperty(db, name, { enumerable: true, get: () => getCollection(name) });
 }
 

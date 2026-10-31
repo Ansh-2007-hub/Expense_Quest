@@ -18,3 +18,5 @@ services:
         value: https://expense-quest-qxabon.v2.appdeploy.ai
       - key: MAX_UPLOAD_MB
         value: "5"
+      - key: MAX_CSV_ROWS
+        value: "5000"

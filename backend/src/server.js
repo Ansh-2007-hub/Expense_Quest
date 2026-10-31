@@ -9,16 +9,32 @@ const { createHash } = require('node:crypto');
 const cors = require('cors');
 const multer = require('multer');
 const db = require('./db');
-const { parseExpenses, monthKeyFromDate } = require('./csv');
+const { parseExpenses } = require('./csv');
 const { categories } = require('./categorize');
 const { deriveAchievements } = require('./achievements');
 const { buildBudgetSummary } = require('./budgets');
+const { buildExpenseCsv } = require('./csvExport');
+const { buildQuestReport } = require('./reports');
+const {
+  SESSION_TTL_MS,
+  normalizeEmail,
+  validatePassword,
+  hashPassword,
+  verifyPassword,
+  createSessionToken,
+  hashSessionToken,
+  bearerToken,
+  publicUser,
+} = require('./auth');
 
 const app = express();
+app.set('trust proxy', 1);
+const MAX_UPLOAD_MB = Math.min(20, Math.max(1, Number(process.env.MAX_UPLOAD_MB) || 5));
+const MAX_CSV_ROWS = Math.min(10000, Math.max(100, Number(process.env.MAX_CSV_ROWS) || 5000));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: (Number(process.env.MAX_UPLOAD_MB) || 5) * 1024 * 1024,
+    fileSize: MAX_UPLOAD_MB * 1024 * 1024,
     files: 1,
   },
   fileFilter(_req, file, callback) {
@@ -43,7 +59,7 @@ app.use(
   cors({
     origin: origin.split(',').map((value) => value.trim()),
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   }),
 );
 app.use(express.json({ limit: '32kb' }));
@@ -140,12 +156,24 @@ function importFingerprint(rows) {
   return createHash('sha256').update(normalized.join('\u001e')).digest('hex');
 }
 
-async function getQuest(id, session) {
-  return db.quests.findOne({ _id: id }, session ? { session } : undefined);
+function parseUploadedExpenses(buffer) {
+  const rows = parseExpenses(buffer);
+  if (rows.length > MAX_CSV_ROWS) {
+    throw new HttpError(413, `This CSV has ${rows.length} rows. The current limit is ${MAX_CSV_ROWS} rows per quest.`);
+  }
+  return rows;
 }
 
-async function playerView(player) {
+async function getQuest(id, userId, session) {
+  return db.quests.findOne(
+    { _id: id, user_id: userId },
+    session ? { session } : undefined,
+  );
+}
+
+async function playerView(player, userId) {
   const reviewedTransactions = await db.transactions.countDocuments({
+    user_id: userId,
     reviewed: true,
   });
   return {
@@ -159,16 +187,98 @@ async function playerView(player) {
   };
 }
 
-async function budgetSummary(currency) {
+function mongoMonthKey(dateField = '$date') {
+  const value = { $ifNull: [dateField, ''] };
+  const parts = { $split: [value, '/'] };
+  const toInteger = (input) => ({ $convert: { input, to: 'int', onError: null, onNull: null } });
+  return {
+    $switch: {
+      branches: [
+        {
+          case: { $regexMatch: { input: value, regex: /^\d{4}-\d{1,2}-\d{1,2}/ } },
+          then: {
+            $let: {
+              vars: { isoMonth: { $substrBytes: [value, 0, 7] } },
+              in: {
+                $let: {
+                  vars: { pieces: { $split: ['$$isoMonth', '-'] } },
+                  in: {
+                    $concat: [
+                      { $arrayElemAt: ['$$pieces', 0] },
+                      '-',
+                      { $cond: [
+                        { $eq: [{ $strLenBytes: { $arrayElemAt: ['$$pieces', 1] } }, 1] },
+                        { $concat: ['0', { $arrayElemAt: ['$$pieces', 1] }] },
+                        { $arrayElemAt: ['$$pieces', 1] },
+                      ] },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          case: { $regexMatch: { input: value, regex: /^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$/ } },
+          then: {
+            $let: {
+              vars: {
+                first: toInteger({ $arrayElemAt: [parts, 0] }),
+                second: toInteger({ $arrayElemAt: [parts, 1] }),
+                year: toInteger({ $arrayElemAt: [parts, 2] }),
+              },
+              in: {
+                $let: {
+                  vars: {
+                    month: { $cond: [{ $gt: ['$$first', 12] }, '$$second', '$$first'] },
+                    yearFull: { $cond: [
+                      { $lt: ['$$year', 100] },
+                      { $add: ['$$year', { $cond: [{ $lt: ['$$year', 70] }, 2000, 1900] }] },
+                      '$$year',
+                    ] },
+                  },
+                  in: {
+                    $concat: [
+                      { $toString: '$$yearFull' },
+                      '-',
+                      { $cond: [{ $lt: ['$$month', 10] }, { $concat: ['0', { $toString: '$$month' }] }, { $toString: '$$month' }] },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+      default: {
+        $let: {
+          vars: { parsed: { $dateFromString: { dateString: value, onError: null, onNull: null } } },
+          in: { $cond: [
+            { $ne: ['$$parsed', null] },
+            { $dateToString: { date: '$$parsed', format: '%Y-%m', timezone: 'UTC' } },
+            null,
+          ] },
+        },
+      },
+    },
+  };
+}
+
+async function budgetSummary(currency, userId) {
   const month = new Date().toISOString().slice(0, 7);
-  const [budget, transactions] = await Promise.all([
-    db.budgets.findOne({ _id: currency }),
+  const budgetId = `${userId}:${currency}`;
+  const [budget, spending] = await Promise.all([
+    db.budgets.findOne({ _id: budgetId, user_id: userId, currency }),
     db.transactions
-      .find({ currency })
-      .project({ amount: 1, direction: 1, date: 1 })
-      .toArray(),
+      .aggregate([
+        { $match: { user_id: userId, currency, direction: { $ne: 'credit' } } },
+        { $set: { month_key: mongoMonthKey() } },
+        { $match: { month_key: month } },
+        { $group: { _id: null, spending: { $sum: '$amount' } } },
+      ])
+      .next(),
   ]);
-  const summary = buildBudgetSummary({ currency, month, budget, transactions });
+  const summary = buildBudgetSummary({ currency, month, budget: budget ? { ...budget, _id: currency } : null, currentMonthSpending: spending?.spending || 0 });
   if (summary.budget)
     summary.budget.updatedAt = databaseTimestamp(summary.budget.updatedAt);
   return summary;
@@ -192,6 +302,100 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+const authWindows = new Map();
+function authRateLimit(req, res, next) {
+  const now = Date.now();
+  const key = `${req.ip}:${req.path}`;
+  const current = authWindows.get(key);
+  const windowState = !current || now - current.startedAt > 15 * 60 * 1000
+    ? { startedAt: now, count: 0 }
+    : current;
+  windowState.count += 1;
+  authWindows.set(key, windowState);
+  if (authWindows.size > 10_000) {
+    for (const [candidate, value] of authWindows) {
+      if (now - value.startedAt > 15 * 60 * 1000) authWindows.delete(candidate);
+    }
+  }
+  if (windowState.count > 20) {
+    return res.status(429).json({ success: false, error: 'Too many account attempts. Please try again in a few minutes.' });
+  }
+  return next();
+}
+
+async function issueSession(user, res, status = 200) {
+  const token = createSessionToken();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+  const userId = String(user._id);
+  await db.sessions.insertOne({
+    token_hash: hashSessionToken(token),
+    user_id: userId,
+    created_at: now,
+    expires_at: expiresAt,
+  });
+  await db.players.updateOne(
+    { _id: userId },
+    { $setOnInsert: { xp: 0, quests_completed: 0 } },
+    { upsert: true },
+  );
+  return res.status(status).json({ success: true, token, user: publicUser(user) });
+}
+
+app.post('/api/auth/register', authRateLimit, async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = validatePassword(req.body?.password);
+  if (await db.users.findOne({ email })) {
+    throw new HttpError(409, 'An account with this email already exists. Sign in instead.');
+  }
+  const user = {
+    email,
+    password_hash: await hashPassword(password),
+    created_at: new Date(),
+  };
+  const inserted = await db.users.insertOne(user);
+  user._id = inserted.insertedId;
+  return issueSession(user, res, 201);
+});
+
+app.post('/api/auth/login', authRateLimit, async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = validatePassword(req.body?.password);
+  const user = await db.users.findOne({ email });
+  if (!user || !(await verifyPassword(password, user.password_hash))) {
+    throw new HttpError(401, 'Email or password is incorrect.');
+  }
+  return issueSession(user, res);
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  const token = bearerToken(req);
+  if (token) await db.sessions.deleteOne({ token_hash: hashSessionToken(token) });
+  return res.json({ success: true });
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  const token = bearerToken(req);
+  if (!token) return res.status(401).json({ success: false, error: 'Sign in to continue.' });
+  const session = await db.sessions.findOne({ token_hash: hashSessionToken(token), expires_at: { $gt: new Date() } });
+  if (!session) return res.status(401).json({ success: false, error: 'Your session has expired. Sign in again.' });
+  const user = await db.users.findOne({ _id: new (require('mongodb').ObjectId)(session.user_id) });
+  if (!user) return res.status(401).json({ success: false, error: 'Your account could not be found. Sign in again.' });
+  return res.json({ success: true, user: publicUser(user) });
+});
+
+app.use('/api', async (req, res, next) => {
+  const token = bearerToken(req);
+  if (!token) return res.status(401).json({ success: false, error: 'Sign in to continue.' });
+  const session = await db.sessions.findOne({ token_hash: hashSessionToken(token), expires_at: { $gt: new Date() } });
+  if (!session) return res.status(401).json({ success: false, error: 'Your session has expired. Sign in again.' });
+  const ObjectId = require('mongodb').ObjectId;
+  const user = await db.users.findOne({ _id: ObjectId.isValid(session.user_id) ? new ObjectId(session.user_id) : null });
+  if (!user) return res.status(401).json({ success: false, error: 'Account is unavailable. Sign in again.' });
+  req.user = { id: String(user._id), email: user.email };
+  return next();
+});
+
 app.post('/api/quests/preview', upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({
@@ -200,10 +404,10 @@ app.post('/api/quests/preview', upload.single('file'), async (req, res) => {
     });
   }
 
-  const rows = parseExpenses(req.file.buffer);
+  const rows = parseUploadedExpenses(req.file.buffer);
   const contentHash = importFingerprint(rows);
   const existingQuest = db.isConnected()
-    ? await db.quests.findOne({ content_hash: contentHash })
+    ? await db.quests.findOne({ user_id: req.user.id, content_hash: contentHash })
     : null;
   return res.json({
     success: true,
@@ -230,11 +434,11 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
     });
   }
 
-  const rows = parseExpenses(req.file.buffer);
+  const rows = parseUploadedExpenses(req.file.buffer);
   const contentHash = importFingerprint(rows);
   const result = await db.withTransaction(async (session) => {
     const existingQuest = await db.quests.findOne(
-      { content_hash: contentHash },
+      { user_id: req.user.id, content_hash: contentHash },
       { session },
     );
     if (existingQuest) {
@@ -246,6 +450,7 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
     const [questId] = await db.reserveIds('quest', 1, session);
     const quest = {
       _id: questId,
+      user_id: req.user.id,
       content_hash: contentHash,
       currency: rows[0].currency || null,
       total_transactions: rows.length,
@@ -262,6 +467,7 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
     );
     const transactions = rows.map((row, index) => ({
       _id: transactionIds[index],
+      user_id: req.user.id,
       quest_id: questId,
       date: row.date,
       description: row.description,
@@ -307,7 +513,7 @@ app.post('/api/quests/upload', upload.single('file'), async (req, res) => {
 
 app.get('/api/quests/:id', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && (await getQuest(id));
+  const quest = id && (await getQuest(id, req.user.id));
   if (!quest)
     return res.status(404).json({ success: false, error: 'Quest not found.' });
   return res.json({ success: true, quest: questView(quest) });
@@ -315,28 +521,36 @@ app.get('/api/quests/:id', async (req, res) => {
 
 app.get('/api/quests/:id/transactions', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && (await getQuest(id));
+  const quest = id && (await getQuest(id, req.user.id));
   if (!quest)
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transactions = await db.transactions
-    .find({ quest_id: id })
-    .sort({ _id: 1 })
-    .toArray();
+  const query = db.transactions.find({ user_id: req.user.id, quest_id: id }).sort({ _id: 1 });
+  const requestedPage = Number.parseInt(req.query.page, 10);
+  const requestedLimit = Number.parseInt(req.query.limit, 10);
+  const paginated = Number.isSafeInteger(requestedPage) || Number.isSafeInteger(requestedLimit);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  const limit = Number.isSafeInteger(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 50;
+  if (paginated) query.skip((page - 1) * limit).limit(limit);
+  const [transactions, total] = await Promise.all([
+    query.toArray(),
+    paginated ? db.transactions.countDocuments({ user_id: req.user.id, quest_id: id }) : Promise.resolve(null),
+  ]);
   return res.json({
     success: true,
     transactions: transactions.map(transactionView),
+    ...(paginated ? { pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } } : {}),
   });
 });
 
 app.get('/api/quests/:id/transactions/next', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && (await getQuest(id));
+  const quest = id && (await getQuest(id, req.user.id));
   if (!quest)
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
   const transaction = await db.transactions.findOne(
-    { quest_id: id, reviewed: false, skipped: { $ne: true } },
+    { user_id: req.user.id, quest_id: id, reviewed: false, skipped: { $ne: true } },
     { sort: { _id: 1 } },
   );
   return res.json({
@@ -361,17 +575,17 @@ app.patch('/api/transactions/:id', async (req, res) => {
   }
 
   const result = await db.withTransaction(async (session) => {
-    const transaction = await db.transactions.findOne({ _id: id }, { session });
+    const transaction = await db.transactions.findOne({ _id: id, user_id: req.user.id }, { session });
     if (!transaction) throw new HttpError(404, 'Transaction not found.');
     if (transaction.reviewed)
       throw new HttpError(409, 'Transaction has already been reviewed.');
 
-    const quest = await getQuest(transaction.quest_id, session);
+    const quest = await getQuest(transaction.quest_id, req.user.id, session);
     if (!quest) throw new HttpError(404, 'Quest not found.');
 
     const reviewedAt = new Date();
     const update = await db.transactions.updateOne(
-      { _id: id, reviewed: false },
+      { _id: id, user_id: req.user.id, reviewed: false },
       {
         $set: {
           final_category: category,
@@ -391,10 +605,10 @@ app.patch('/api/transactions/:id', async (req, res) => {
       quest.status !== 'completed';
     const questUpdate = { $inc: { reviewed_transactions: 1 } };
     if (completed) questUpdate.$set = { status: 'completed' };
-    await db.quests.updateOne({ _id: quest._id }, questUpdate, { session });
+    await db.quests.updateOne({ _id: quest._id, user_id: req.user.id }, questUpdate, { session });
 
     const player = await db.players.findOneAndUpdate(
-      { _id: 'player' },
+      { _id: req.user.id },
       { $inc: { xp: 10, quests_completed: completed ? 1 : 0 } },
       { returnDocument: 'after', includeResultMetadata: false, session },
     );
@@ -418,7 +632,7 @@ app.patch('/api/transactions/:id', async (req, res) => {
   return res.json({
     success: true,
     transaction: transactionView(result.transaction),
-    player: await playerView(result.player),
+    player: await playerView(result.player, req.user.id),
     quest: {
       reviewed: result.quest.reviewed_transactions,
       total: result.quest.total_transactions,
@@ -443,7 +657,7 @@ app.patch('/api/transactions/:id/category', async (req, res) => {
     });
   }
   const transaction = await db.transactions.findOneAndUpdate(
-    { _id: id },
+    { _id: id, user_id: req.user.id },
     { $set: { final_category: category } },
     { returnDocument: 'after', includeResultMetadata: false },
   );
@@ -457,7 +671,7 @@ app.patch('/api/transactions/:id/category', async (req, res) => {
 
 app.post('/api/transactions/:id/skip', async (req, res) => {
   const id = validId(req.params.id);
-  const transaction = id && (await db.transactions.findOne({ _id: id }));
+  const transaction = id && (await db.transactions.findOne({ _id: id, user_id: req.user.id }));
   if (!transaction)
     return res
       .status(404)
@@ -471,7 +685,7 @@ app.post('/api/transactions/:id/skip', async (req, res) => {
       });
   }
   const updated = await db.transactions.findOneAndUpdate(
-    { _id: id, reviewed: false },
+    { _id: id, user_id: req.user.id, reviewed: false },
     { $set: { skipped: true } },
     { returnDocument: 'after', includeResultMetadata: false },
   );
@@ -496,12 +710,12 @@ app.post('/api/transactions/:id/unskip', async (req, res) => {
       .status(400)
       .json({ success: false, error: 'Invalid transaction ID.' });
   const updated = await db.transactions.findOneAndUpdate(
-    { _id: id, reviewed: false },
+    { _id: id, user_id: req.user.id, reviewed: false },
     { $set: { skipped: false } },
     { returnDocument: 'after', includeResultMetadata: false },
   );
   if (!updated) {
-    const transaction = await db.transactions.findOne({ _id: id });
+    const transaction = await db.transactions.findOne({ _id: id, user_id: req.user.id });
     if (!transaction)
       return res
         .status(404)
@@ -524,13 +738,13 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
       .json({ success: false, error: 'Transaction not found.' });
 
   const result = await db.withTransaction(async (session) => {
-    const transaction = await db.transactions.findOne({ _id: id }, { session });
+    const transaction = await db.transactions.findOne({ _id: id, user_id: req.user.id }, { session });
     if (!transaction) throw new HttpError(404, 'Transaction not found.');
     if (!transaction.reviewed)
       throw new HttpError(409, 'Transaction is not reviewed.');
 
     const latest = await db.transactions
-      .find({ quest_id: transaction.quest_id, reviewed: true }, { session })
+      .find({ user_id: req.user.id, quest_id: transaction.quest_id, reviewed: true }, { session })
       .sort({ reviewed_at: -1, _id: -1 })
       .limit(1)
       .next();
@@ -538,12 +752,12 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
       throw new HttpError(409, 'Only the most recent review can be undone.');
     }
 
-    const quest = await getQuest(transaction.quest_id, session);
+    const quest = await getQuest(transaction.quest_id, req.user.id, session);
     if (!quest) throw new HttpError(404, 'Quest not found.');
 
     const wasCompleted = quest.status === 'completed';
     const updatedTransaction = await db.transactions.findOneAndUpdate(
-      { _id: id, reviewed: true },
+      { _id: id, user_id: req.user.id, reviewed: true },
       { $set: { reviewed: false, skipped: false, reviewed_at: null } },
       { returnDocument: 'after', includeResultMetadata: false, session },
     );
@@ -551,12 +765,12 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
       throw new HttpError(409, 'Transaction is not reviewed.');
 
     await db.quests.updateOne(
-      { _id: quest._id },
+      { _id: quest._id, user_id: req.user.id },
       { $inc: { reviewed_transactions: -1 }, $set: { status: 'active' } },
       { session },
     );
 
-    const player = await db.players.findOne({ _id: 'player' }, { session });
+    const player = await db.players.findOne({ _id: req.user.id }, { session });
     const updatedPlayer = {
       xp: Math.max(0, player.xp - 10),
       quests_completed: Math.max(
@@ -565,7 +779,7 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
       ),
     };
     await db.players.updateOne(
-      { _id: 'player' },
+      { _id: req.user.id },
       { $set: updatedPlayer },
       { session },
     );
@@ -584,16 +798,16 @@ app.post('/api/transactions/:id/undo', async (req, res) => {
   return res.json({
     success: true,
     transaction: transactionView(result.transaction),
-    player: await playerView(result.player),
+    player: await playerView(result.player, req.user.id),
     quest: questView(result.quest),
   });
 });
 
-app.get('/api/player', async (_req, res) => {
-  const player = await db.players.findOne({ _id: 'player' });
+app.get('/api/player', async (req, res) => {
+  const player = await db.players.findOne({ _id: req.user.id });
   return res.json({
     success: true,
-    player: await playerView(player),
+    player: await playerView(player, req.user.id),
   });
 });
 
@@ -601,7 +815,7 @@ app.get('/api/budgets/:currency', async (req, res) => {
   const currency = validCurrency(req.params.currency);
   if (!currency)
     return res.status(400).json({ success: false, error: 'Currency must be a three-letter code.' });
-  return res.json({ success: true, ...await budgetSummary(currency) });
+  return res.json({ success: true, ...await budgetSummary(currency, req.user.id) });
 });
 
 app.put('/api/budgets/:currency', async (req, res) => {
@@ -616,12 +830,14 @@ app.put('/api/budgets/:currency', async (req, res) => {
     });
   }
   if (monthlyAmount === 0) {
-    await db.budgets.deleteOne({ _id: currency });
+    await db.budgets.deleteOne({ _id: `${req.user.id}:${currency}`, user_id: req.user.id });
   } else {
     await db.budgets.updateOne(
-      { _id: currency },
+      { _id: `${req.user.id}:${currency}`, user_id: req.user.id },
       {
         $set: {
+          currency,
+          user_id: req.user.id,
           monthly_amount: roundCurrency(monthlyAmount, currency),
           updated_at: new Date(),
         },
@@ -629,160 +845,32 @@ app.put('/api/budgets/:currency', async (req, res) => {
       { upsert: true },
     );
   }
-  return res.json({ success: true, ...await budgetSummary(currency) });
+  return res.json({ success: true, ...await budgetSummary(currency, req.user.id) });
 });
 
 app.get('/api/quests/:id/report', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && (await getQuest(id));
+  const quest = id && (await getQuest(id, req.user.id));
   if (!quest)
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
-  const transactions = await db.transactions
-    .find({ quest_id: id })
-    .sort({ _id: 1 })
-    .toArray();
-  const debitTransactions = transactions.filter(
-    (transaction) => transaction.direction !== 'credit',
-  );
-  const creditTransactions = transactions.filter(
-    (transaction) => transaction.direction === 'credit',
-  );
-  const unroundedTotal = debitTransactions.reduce(
-    (sum, transaction) => sum + transaction.amount,
-    0,
-  );
-  const unroundedCredits = creditTransactions.reduce(
-    (sum, transaction) => sum + transaction.amount,
-    0,
-  );
-  const totalExpenses = roundCurrency(unroundedTotal, quest.currency);
-  const totalCredits = roundCurrency(unroundedCredits, quest.currency);
-  const categoryTotals = new Map();
-  const monthlyTotals = new Map();
-  const merchantTotals = new Map();
+  const report = await buildQuestReport(db.transactions, { userId: req.user.id, questId: id, currency: quest.currency });
 
-  for (const transaction of debitTransactions) {
-    const current = categoryTotals.get(transaction.final_category) || {
-      spending: 0,
-      count: 0,
-    };
-    current.spending += transaction.amount;
-    current.count += 1;
-    categoryTotals.set(transaction.final_category, current);
 
-    const merchantName = String(transaction.description || '').trim();
-    const merchantKey = merchantName.toLocaleLowerCase();
-    const merchant = merchantTotals.get(merchantKey) || {
-      merchant: merchantName,
-      spending: 0,
-      count: 0,
-    };
-    merchant.spending += transaction.amount;
-    merchant.count += 1;
-    merchantTotals.set(merchantKey, merchant);
-
-    const month = monthKeyFromDate(transaction.date);
-    if (month)
-      monthlyTotals.set(
-        month,
-        (monthlyTotals.get(month) || 0) + transaction.amount,
-      );
-  }
-
-  const categorySpending = [...categoryTotals.entries()]
-    .map(([category, totals]) => ({
-      category,
-      spending: roundCurrency(totals.spending, quest.currency),
-      count: totals.count,
-    }))
-    .sort((left, right) => right.spending - left.spending);
-
-  const largest = [...debitTransactions].sort((left, right) => {
-    const amountDifference = right.amount - left.amount;
-    return amountDifference || left._id - right._id;
-  })[0];
-  const topTransactions = [...debitTransactions]
-    .sort((left, right) => {
-      const amountDifference = right.amount - left.amount;
-      return amountDifference || left._id - right._id;
-    })
-    .slice(0, 5)
-    .map((transaction) => ({
-      date: transaction.date,
-      description: transaction.description,
-      amount: transaction.amount,
-      category: transaction.final_category,
-      currency: transaction.currency || quest.currency || null,
-    }));
-
-  const report = {
-    totalExpenses,
-    totalDebits: totalExpenses,
-    totalCredits,
-    netSpend: roundCurrency(unroundedTotal - unroundedCredits, quest.currency),
-    currency: quest.currency || null,
-    totalTransactions: transactions.length,
-    categorySpending,
-    topMerchants: [...merchantTotals.values()]
-      .sort((left, right) => right.spending - left.spending)
-      .slice(0, 5)
-      .map((merchant) => ({
-        ...merchant,
-        spending: roundCurrency(merchant.spending, quest.currency),
-      })),
-    topTransactions,
-    highestSpendingCategory: categorySpending[0]?.category || null,
-    averageTransactionAmount: debitTransactions.length
-      ? roundCurrency(unroundedTotal / debitTransactions.length, quest.currency)
-      : 0,
-    largestTransaction: largest
-      ? {
-          date: largest.date,
-          description: largest.description,
-          amount: largest.amount,
-          currency: largest.currency || quest.currency || null,
-        }
-      : null,
-    monthlySpending: [...monthlyTotals.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([month, spending]) => ({
-        month,
-        spending: roundCurrency(spending, quest.currency),
-      })),
-  };
-
-  return res.json({ success: true, report });
 });
 
 app.get('/api/quests/:id/export', async (req, res) => {
   const id = validId(req.params.id);
-  const quest = id && (await getQuest(id));
+  const quest = id && (await getQuest(id, req.user.id));
   if (!quest)
     return res.status(404).json({ success: false, error: 'Quest not found.' });
 
   const transactions = await db.transactions
-    .find({ quest_id: id })
+    .find({ user_id: req.user.id, quest_id: id })
     .sort({ _id: 1 })
+    .limit(MAX_CSV_ROWS)
     .toArray();
-  const escapeCsv = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
-  const csv = [
-    'Date,Description,Amount,Direction,Currency,Suggested Category,Final Category,Reviewed',
-    ...transactions.map((transaction) =>
-      [
-        transaction.date,
-        transaction.description,
-        transaction.amount,
-        transaction.direction || 'debit',
-        transaction.currency || quest.currency,
-        transaction.suggested_category,
-        transaction.final_category,
-        transaction.reviewed ? 'true' : 'false',
-      ]
-        .map(escapeCsv)
-        .join(','),
-    ),
-  ].join('\r\n');
+  const csv = buildExpenseCsv(transactions, quest.currency);
 
   return res.type('text/csv').attachment(`expense-quest-${id}.csv`).send(csv);
 });
@@ -811,12 +899,33 @@ async function start() {
     console.log(`Expense Quest API listening on 0.0.0.0:${port}`);
   });
 
+  let shuttingDown = false;
+  let databaseClosing;
+  const closeDatabase = () => {
+    databaseClosing ||= db.close();
+    return databaseClosing;
+  };
   const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`Received ${signal}; closing Expense Quest API.`);
-    server.close(async () => {
-      await db.close();
-      process.exit(0);
+    const forceClose = setTimeout(() => {
+      console.error('Graceful shutdown deadline reached; closing remaining connections.');
+      server.closeAllConnections?.();
+      closeDatabase().finally(() => { process.exitCode = 1; });
+    }, 15_000);
+    forceClose.unref();
+    server.close(async (error) => {
+      clearTimeout(forceClose);
+      try {
+        await closeDatabase();
+        if (error) process.exitCode = 1;
+      } catch (closeError) {
+        console.error(`MongoDB shutdown failed (${closeError.name || 'Error'}).`);
+        process.exitCode = 1;
+      }
     });
+    server.closeIdleConnections?.();
   };
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));

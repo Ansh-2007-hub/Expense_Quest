@@ -18,13 +18,12 @@ function roundCurrency(value, currency) {
   return Math.round((value + Number.EPSILON) * scale) / scale;
 }
 
-function buildBudgetSummary({ currency, month, budget, transactions }) {
+function buildBudgetSummary({ currency, month, budget, transactions = [], currentMonthSpending: aggregatedSpending }) {
   const currentMonthSpending = roundCurrency(
-    transactions.reduce(
-      (sum, transaction) =>
-        transaction.direction === 'credit' || monthKeyFromDate(transaction.date) !== month
-          ? sum
-          : sum + (Number(transaction.amount) || 0),
+    aggregatedSpending ?? transactions.reduce(
+      (sum, transaction) => transaction.direction === 'credit' || monthKeyFromDate(transaction.date) !== month
+        ? sum
+        : sum + (Number(transaction.amount) || 0),
       0,
     ),
     currency,
