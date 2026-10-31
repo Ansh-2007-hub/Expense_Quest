@@ -1,0 +1,191 @@
+.settings-button {
+  border:1px solid #393746;
+  background:#252430;
+  border-radius:7px;
+  width:34px;
+  height:34px;
+  display:grid;
+  place-items:center;
+  color:#c5b4e8
+}
+.settings-button:hover {
+  border-color:#8b74b3
+}
+.privacy-note button {
+  border:0;
+  background:none;
+  padding:0;
+  color:#b6a2d8;
+  font-size:8px;
+  text-decoration:underline
+}
+.modal-scrim {
+  position:fixed;
+  inset:0;
+  background:#08080dbb;
+  z-index:30;
+  display:grid;
+  place-items:center;
+  padding:18px
+}
+.api-modal {
+  position:relative;
+  width:min(440px,100%);
+  background:#1c1b27;
+  border:1px solid #464151;
+  border-radius:12px;
+  padding:25px;
+  box-shadow:0 20px 80px #0009
+}
+.api-modal h2 {
+  font:24px 'DM Serif Display',serif;
+  margin:12px 0 6px
+}
+.api-modal p {
+  font-size:10px;
+  line-height:1.6;
+  color:#a2a0aa;
+  margin:0 0 18px
+}
+.api-modal label {
+  display:block;
+  color:#a29cae;
+  font-size:8px;
+  letter-spacing:1px;
+  margin-bottom:15px
+}
+.api-modal input {
+  display:block;
+  margin-top:7px;
+  width:100%;
+  height:39px;
+  padding:0 10px;
+  border:1px solid #393746;
+  border-radius:6px;
+  background:#14141c;
+  color:#f6f3ec;
+  font-size:11px;
+  outline:none
+}
+.api-modal input:focus {
+  border-color:#a98afb
+}
+.modal-close {
+  position:absolute;
+  right:14px;
+  top:14px;
+  border:0;
+  background:transparent;
+  color:#aaa6b2
+}
+.hamb {
+  border:0;
+  background:transparent;
+  color:#c9c5d1
+}
+.empty-actions .button-secondary {
+  display:inline-flex;
+  align-items:center
+}
+.xp-label {
+  animation:xp-pop .42s cubic-bezier(.2,.8,.25,1)
+}
+.health-meter i,.thin-meter i,.xpbar i {
+  transition:width .45s cubic-bezier(.2,.8,.25,1)
+}
+.boss-art {
+  animation:monster-idle 3.8s ease-in-out infinite
+}
+.boss-art:after {
+  content:'';
+  position:absolute;
+  inset:-8px;
+  border:1px solid #d8968350;
+  border-radius:50%;
+  animation:boss-ring 4s ease-in-out infinite
+}
+.victory-orbit {
+  animation:victory-glow 2.8s ease-in-out infinite
+}
+.category-choice {
+  transition:background .16s,border-color .16s,transform .16s
+}
+.category-choice:active {
+  transform:scale(.98)
+}
+.button-primary:focus-visible,.button-secondary:focus-visible,.nav-link:focus-visible,.category-choice:focus-visible,.skip-button:focus-visible,.settings-button:focus-visible,.dropzone:focus-within {
+  outline:2px solid #d2b8ff;
+  outline-offset:3px
+}
+.receipt-card {
+  animation:receipt-in .35s ease-out both
+}
+.how-row b i {
+  transition:background .2s,transform .2s
+}
+.how-row b:hover i {
+  transform:scale(1.12);
+  background:#4a3a64
+}
+@keyframes xp-pop {
+  0% {
+  transform:scale(.8);
+  color:#fff0ac
+}
+100% {
+  transform:scale(1);
+  color:#aaa5bb
+}
+
+}
+@keyframes monster-idle {
+  0%,100% {
+  transform:translateY(0)
+}
+50% {
+  transform:translateY(-4px)
+}
+
+}
+@keyframes boss-ring {
+  0%,100% {
+  transform:scale(.95);
+  opacity:.45
+}
+50% {
+  transform:scale(1.07);
+  opacity:.9
+}
+
+}
+@keyframes victory-glow {
+  0%,100% {
+  box-shadow:0 0 32px #dfb96312;
+  transform:scale(1)
+}
+50% {
+  box-shadow:0 0 55px #dfb96334;
+  transform:scale(1.035)
+}
+
+}
+@keyframes receipt-in {
+  from {
+  opacity:0;
+  transform:translateY(8px) rotate(-1deg)
+}
+to {
+  opacity:1;
+  transform:translateY(0) rotate(0)
+}
+
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after {
+  scroll-behavior:auto!important;
+  animation-duration:.01ms!important;
+  animation-iteration-count:1!important;
+  transition-duration:.01ms!important
+}
+
+}

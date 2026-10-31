@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: expense-quest-api
+    runtime: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: expense-quest-sqlite
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /var/data/expense-quest.sqlite
+      - key: FRONTEND_ORIGIN
+        value: https://expense-quest-qxabon.v2.appdeploy.ai
+      - key: MAX_UPLOAD_MB
+        value: "5"

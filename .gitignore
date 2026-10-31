@@ -1,0 +1,13 @@
+dist/
+.freebuff/
+coverage/
+node_modules/
+.env
+.env.*
+!.env.example
+data/*.sqlite*
+backend/data/*.sqlite*
+backend/node_modules/
+uploads/*
+!uploads/.gitkeep
+npm-debug.log*

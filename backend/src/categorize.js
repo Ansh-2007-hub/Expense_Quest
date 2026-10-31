@@ -1,0 +1,3 @@
+const rules=[['Food',/restaurant|cafe|food|swiggy|zomato|grocery|groceries|bakery|pizza|coffee/i],['Shopping',/amazon|flipkart|store|shopping|mall|retail|clothing/i],['Travel',/uber|ola|metro|petrol|fuel|taxi|flight|train|bus|parking/i],['Bills',/electricity|water bill|internet|rent|utility|broadband|mobile bill/i],['Entertainment',/netflix|spotify|movie|cinema|concert|gaming|theatre/i],['Healthcare',/hospital|pharmacy|medicine|medical|clinic|doctor|health/i],['Education',/school|college|course|books|tuition|university/i]];
+function categorize(description){return rules.find(([,re])=>re.test(description))?.[0]||'Other'}
+module.exports={categorize,categories:[...rules.map(([c])=>c),'Other']};
